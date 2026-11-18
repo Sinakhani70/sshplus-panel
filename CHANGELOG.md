@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.4.0 — Port coordination and firewalls on both servers
+
+### What the check found (and fixed)
+- The installer picked Dropbear ports without looking at what else listens on the server, so a port held by another program (nginx, x-ui, ...) left Dropbear unable to bind it.
+- On the exit server a busy port was only skipped, never resolved.
+- Only ufw on this server was updated; the exit server's firewall and firewalld were ignored.
+
+### New
+- **Conflicts on this server**: installer and panel never choose ports held by other programs; a configured Dropbear/tunnel-Dropbear port that another program holds is replaced by the next free port (Dropbear restarted, firewall opened). Manual port changes containing such a port are refused.
+- **Conflicts on the exit server**: a port busy there is published under another number (`p+10000`, else the next free one) — the panel-server port and client configs stay unchanged. Ports 22 and every other listener on the exit server are never taken over. The mapping is stored, shown in the Tunnel tab, used by the copy button and the port list of "In = server 2" accounts.
+- **Firewalls of both servers**: ufw (active) and firewalld (running) are updated for this server's ports and for the ports published on the exit server; `install.sh` does the same for firewalld.
+- **Tunnel tab**: "Port coordination" card with the port table (server-1 port, type, exit-server port, status) and a "Check & fix conflicts + update firewalls" button. The same check runs automatically on panel start, tunnel install and every port change.
+
+### Notes
+- Closing old ports is not done automatically (rules are only added) so nothing you opened yourself is removed.
+- With the cloud provider's own firewall / security group (outside the server) you still have to open the published ports yourself.
+- firewalld handling is best-effort and was not run for real (the lab used stand-in ufw/firewall-cmd that log the calls).
+
+### How it was tested
+Lab with deliberate conflicts: another program on this server's port 8443 before install (skipped), programs on the exit server's 442, 2087 and the exit sshd's 2222 (published as 10442, 12087, 12222), then new conflicts after install (a program taking a configured port on this server → replaced by 8086 and Dropbear listens there; a new program on the exit server → remapped). Clients entering through the remapped ports reach the right accounts with the right exit IP, the exit server's own programs keep answering, and the stand-in firewall logs show the right ports opened on both servers. UI checked in a real browser.
+
+## v1.3.1 — UI polish
+- The panel version is shown next to the logo (header and login box), so you can see which version is installed. It is taken from the installer's `VERSION`, so the two can never disagree.
+- The "How it works" / bidirectional texts in the Tunnel tab were rewritten for In/Out and no longer scramble in right-to-left layout (`In`/`Out` and the 1→2 style combinations are isolated; no more `=` / `:` that flipped).
+- Note: if the Tunnel tab still says "UDPGW still leaves from this server", that server runs an old version — run the install command again.
+
 ## v1.3.0 — Bidirectional by default, In/Out per account, CK.VPN UI
 
 ### New

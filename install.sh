@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.3.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.4.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.3.0"
+VERSION="1.4.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -116,7 +116,7 @@ touch /root/users.db
 # ports.json: create or top-up to 6 Dropbear ports (SSH ports such as 9011 stay reserved)
 # + "tdb": Dropbear ports reserved for tunnel accounts
 python3 - <<'PY'
-import json,os,subprocess
+import json,os,re,subprocess
 p="/etc/SSHPlus/ports.json"
 d=json.load(open(p)) if os.path.exists(p) else {}
 s1=int(d.get("ssh",22) or 22); s2=int(d.get("ssh2",2222) or 0)
@@ -125,6 +125,12 @@ try:
     o=subprocess.run(["sshd","-T"],capture_output=True,text=True,timeout=10).stdout
     for l in o.splitlines():
         if l.startswith("port "): res.add(int(l.split()[1]))
+except Exception: pass
+try:                                   # ports taken by OTHER programs (nginx, x-ui, ...) are not usable for Dropbear
+    o=subprocess.run(["ss","-ltnpH"],capture_output=True,text=True,timeout=10).stdout
+    for l in o.splitlines():
+        f=l.split(); m=re.search(r":(\d+)$",f[3]) if len(f)>=4 else None
+        if m and not set(re.findall(r'\("([^"]+)"',l))<={"dropbear","sshd"}: res.add(int(m.group(1)))
 except Exception: pass
 old_t=[]
 for x in d.get("tdb",[]):
@@ -582,10 +588,30 @@ def read_bv():
         k,v=l.strip().split("=",1); d[k]=v
   return d
 
-def ufw_open(ports):
+def fw_kind():
   rc,o,_=cmd(["ufw","status"])
-  if rc==0 and o.startswith("Status: active"):
-    for p in ports: cmd(["ufw","allow",f"{p}/tcp"])
+  if rc==0 and o.startswith("Status: active"): return "ufw"
+  if cmd(["systemctl","is-active","firewalld"])[0]==0 and cmd(["firewall-cmd","--state"])[0]==0: return "firewalld"
+  return "none"
+
+def ufw_open(ports):
+  k=fw_kind()
+  for p in sorted(ports):
+    if k=="ufw": cmd(["ufw","allow",f"{p}/tcp"])
+    elif k=="firewalld": cmd(["firewall-cmd","--permanent",f"--add-port={p}/tcp"]); cmd(["firewall-cmd",f"--add-port={p}/tcp"])
+  return k
+
+def listen_ports():
+  # local TCP listeners: port -> set of process names
+  _,o,_=cmd(["ss","-ltnpH"],10); res={}
+  for l in o.splitlines():
+    f=l.split(); m=re.search(r":(\d+)$",f[3]) if len(f)>=4 else None
+    if m: res.setdefault(int(m.group(1)),set()).update(re.findall(r'\("([^"]+)"',l) or ["?"])
+  return res
+
+def foreign_ports():
+  # ports held by programs other than our own Dropbear/OpenSSH
+  return {p for p,n in listen_ports().items() if not n<={"dropbear","sshd"}}
 
 def passwd_map():
   # panel accounts: name -> (uid, shell). shell SHELL = direct account, SHELL_T = tunnel account
@@ -825,7 +851,7 @@ def apply_ports(d):
   bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
   managed={22,to_port(old.get("ssh")),to_port(old.get("ssh2"))}
   extra=sshd_ports()-managed-ssh_set          # e.g. 9011, defined outside the panel
-  reserved=ssh_set|extra|{panel,bvp,bvp+1,2053}
+  reserved=ssh_set|extra|{panel,bvp,bvp+1,2053}|foreign_ports()
   db=[]; dropped=[]
   for x in d.get("db",[]):
     if str(x).strip()=="": continue
@@ -856,7 +882,7 @@ def apply_ports(d):
   ufw_open(ssh_set|set(db)|set(tdb)|{panel})
   if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
   cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
-  if tconf().get("TUN_HOST"): threading.Thread(target=tunnel_route_apply,args=("both",),daemon=True).start()
+  if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()
   return 200,{"ok":1,"db":db,"tdb":tdb,"dropped":dropped}
 
 def save_bv(d):
@@ -925,14 +951,16 @@ iptables -N SSHPLUS_REVF 2>/dev/null; iptables -F SSHPLUS_REVF
 iptables -t nat -C PREROUTING -j SSHPLUS_REV 2>/dev/null || iptables -t nat -I PREROUTING -j SSHPLUS_REV
 iptables -C FORWARD -j SSHPLUS_REVF 2>/dev/null || iptables -I FORWARD -j SSHPLUS_REVF
 sk=""; ok=""
-for p in $(tr ',' ' ' < /etc/sshplus-exit.ports 2>/dev/null); do
-  case "$p" in ''|*[!0-9]*) continue;; esac
-  [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || continue
+# entries are "bport:aport" (this server's public port : port on the panel server); a bare number means the same on both
+for e in $(tr ',' ' ' < /etc/sshplus-exit.ports 2>/dev/null); do
+  case "$e" in *:*) bp=${e%%:*}; ap=${e##*:};; *) bp=$e; ap=$e;; esac
+  case "$bp$ap" in ''|*[!0-9]*) continue;; esac
+  [ "$bp" -ge 1 ] && [ "$bp" -le 65535 ] && [ "$ap" -ge 1 ] && [ "$ap" -le 65535 ] || continue
   # never take over a port this server itself uses (admin SSH on 22, any service already listening)
-  if [ "$p" = 22 ] || ss -ltnH "sport = :$p" 2>/dev/null | grep -q .; then sk="$sk $p"; continue; fi
-  iptables -t nat -A SSHPLUS_REV -p tcp --dport "$p" -j DNAT --to-destination "10.99.0.1:$p"
-  iptables -A SSHPLUS_REVF -o tun99 -p tcp --dport "$p" -j ACCEPT
-  ok="$ok $p"
+  if [ "$bp" = 22 ] || ss -ltnH "sport = :$bp" 2>/dev/null | grep -q .; then sk="$sk $bp:$ap"; continue; fi
+  iptables -t nat -A SSHPLUS_REV -p tcp --dport "$bp" -j DNAT --to-destination "10.99.0.1:$ap"
+  iptables -A SSHPLUS_REVF -o tun99 -p tcp --dport "$ap" -j ACCEPT
+  ok="$ok $bp:$ap"
 done
 [ -n "$ok" ] && r nat POSTROUTING -o tun99 -j MASQUERADE
 echo "REV_OK:${ok# }"; echo "REV_SKIPPED:${sk# }"
@@ -951,7 +979,17 @@ WantedBy=multi-user.target
 XEOF
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable sshplus-exit.service >/dev/null 2>&1 || true
-/usr/local/bin/sshplus-exit.sh
+EXITOUT=$(/usr/local/bin/sshplus-exit.sh)
+printf '%s\n' "$EXITOUT"
+# firewall of THIS (exit) server: open the published ports
+okp=$(printf '%s\n' "$EXITOUT" | sed -n 's/^REV_OK://p')
+FWB=none
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  FWB=ufw; for t in $okp; do ufw allow "${t%%:*}/tcp" >/dev/null 2>&1; done
+elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+  FWB=firewalld; for t in $okp; do firewall-cmd --permanent --add-port="${t%%:*}/tcp" >/dev/null 2>&1; firewall-cmd --add-port="${t%%:*}/tcp" >/dev/null 2>&1; done
+fi
+echo "FW_B:$FWB"
 echo SSHPLUS_REMOTE_OK
 '''
 
@@ -979,7 +1017,8 @@ def tunnel_status(full=False):
   r={"conf":conf,"host":c.get("TUN_HOST",""),"port":to_port(c.get("TUN_PORT",22)) or 22,"user":c.get("TUN_USER",""),
      "exit":c.get("EXIT_IP",""),"since":int(c.get("SINCE","0") or 0),"svc":bool(svc),"up":up,
      "route":"both","rev_ports":[int(x) for x in c.get("REV_PORTS","").split(",") if x.isdigit()],
-     "rev_skipped":[int(x) for x in c.get("REV_SKIPPED","").split(",") if x.isdigit()]}
+     "rev_skipped":[int(x) for x in c.get("REV_SKIPPED","").split(",") if x.isdigit()],
+     "rev_map":[{"a":int(a),"b":int(b)} for a,b in (x.split(":",1) for x in c.get("REV_MAP","").split(",") if ":" in x) if a.isdigit() and b.isdigit()]}
   if full:
     if up:
       r["up"]=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0
@@ -1037,7 +1076,6 @@ def tunnel_setup_run(host,port,user,pw):
   with TSL: TS["run"]=True; TS["steps"]=[]; TS["ok"]=None
   tgt=f"{user}@{host}"; ctx={}
   old_route="both"
-  rports=rev_ports()
   def S(m,fn):
     ts_begin(m)
     try: ok,d=fn()
@@ -1070,15 +1108,25 @@ def tunnel_setup_run(host,port,user,pw):
     rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ok"],t=40)
     return (True,"") if rc==0 and o.endswith("ok") else (False,"ورود با کلید ناموفق: "+(er or o)[-250:])
   def f_remote():
-    rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"bash -s"],inp="export REV_PORTS=%s\n"%",".join(map(str,rports))+REMOTE_SCRIPT,t=400)
+    fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[])))   # this server first
+    mp=rev_map_calc(rev_ports(),remote_listeners(host,port,user))
+    ent=",".join("%d:%d"%(b,a) for a,b in sorted(mp.items()))
+    rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"bash -s"],inp="export REV_PORTS=%s\n"%ent+REMOTE_SCRIPT,t=400)
     if rc!=0 or "SSHPLUS_REMOTE_OK" not in o: return False,(o.splitlines()[-1:] or [er or "failed"])[0][-250:]
+    ctx["okm"]={}; ctx["sk"]=[]
     for l in o.splitlines():
-      if l.startswith("REV_SKIPPED:"): ctx["sk"]=[x for x in l.split(":",1)[1].split() if x.isdigit()]
+      if l.startswith("REV_OK:"):
+        for t in l.split(":",1)[1].split():
+          b,_,a=t.partition(":")
+          if a.isdigit() and b.isdigit(): ctx["okm"][int(a)]=int(b)
+      elif l.startswith("REV_SKIPPED:"): ctx["sk"]=[t.partition(":")[2] for t in l.split(":",1)[1].split()]
+    if fixed: return True,"تداخل پورت روی این سرور رفع شد: "+", ".join("%d←%d"%(c["from"],c["to"]) for c in fixed)
     return True,"PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد"
   def f_local():
     tconf_write({"TUN_HOST":host,"TUN_PORT":port,"TUN_USER":user,"TUN_DEV":TUN_DEV,"TUN_ID":TUN_ID,
                  "TUN_LOCAL":TUN_LOCAL,"TUN_REMOTE":TUN_REMOTE,"SINCE":int(time.time()),"ROUTE":old_route,
-                 "REV_PORTS":",".join(str(x) for x in rports if str(x) not in ctx.get("sk",[])),
+                 "REV_PORTS":",".join(map(str,sorted(ctx.get("okm",{})))),
+                 "REV_MAP":",".join("%d:%d"%(a,b) for a,b in sorted(ctx.get("okm",{}).items())),
                  "REV_SKIPPED":",".join(ctx.get("sk",[]))})
     cmd([TNET,"sync"]); cmd(["systemctl","daemon-reload"])
     cmd(["systemctl","enable","sshplus-tunnel"]); cmd(["systemctl","restart","sshplus-tunnel"],30)
@@ -1120,16 +1168,67 @@ def rev_ports():
     if v and v!=22 and v not in out: out.append(v)
   return out
 
-def tunnel_push(ports):
-  # (re)applies the exit-server side: NAT + "enter via exit server" forwards for `ports`
-  c=tconf(); host=c.get("TUN_HOST",""); port=to_port(c.get("TUN_PORT",22)) or 22; user=c.get("TUN_USER","root")
-  pre="export SKIP_APT=1 REV_PORTS=%s\n"%",".join(str(x) for x in ports)
-  rc,o,er=_run(["ssh"]+_ssh_o(port)+[f"{user}@{host}","bash -s"],inp=pre+REMOTE_SCRIPT,t=120)
-  if rc!=0 or "SSHPLUS_REMOTE_OK" not in o: return False,[],(o.splitlines()[-1:] or [er or "failed"])[0][-200:]
-  sk=[]
+def ports_autofix():
+  # Dropbear ports (direct + tunnel) that another program already listens on are replaced by free ports
+  pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[],"tdb":[]}); lis=listen_ports(); foreign=foreign_ports()
+  panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
+  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))
+  changes=[]
+  for key in ("db","tdb"):
+    out=[]
+    for x in pc.get(key,[]):
+      v=to_port(x)
+      if v and v in foreign:
+        q=next((q for q in range(v+1,min(v+500,65535)) if q not in used),0)
+        if q:
+          used.add(q); out.append(q)
+          changes.append({"from":v,"to":q,"kind":key,"by":",".join(sorted(lis.get(v,[])))}); continue
+      out.append(x)
+    pc[key]=out
+  if changes:
+    wjson(PORTS,pc); SSHP["t"]=0
+    ufw_open({c["to"] for c in changes})
+    cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+  return changes
+
+def remote_listeners(host,port,user):
+  # TCP ports the exit server already listens on (None if it cannot be asked)
+  rc,o,_=_run(["ssh"]+_ssh_o(port)+[f"{user}@{host}","ss -ltnH"],t=40)
+  if rc!=0: return None
+  res=set()
   for l in o.splitlines():
-    if l.startswith("REV_SKIPPED:"): sk=[int(x) for x in l.split(":",1)[1].split() if x.isdigit()]
-  return True,sk,""
+    f=l.split(); m=re.search(r":(\d+)$",f[3]) if len(f)>=4 else None
+    if m: res.add(int(m.group(1)))
+  return res
+
+def rev_map_calc(aports,blis):
+  # this server's port -> port on the exit server. Same number whenever it is free there; otherwise a nearby free one
+  used=set(blis or ())|{22}; m={}
+  for p in aports:
+    if p not in used: m[p]=p; used.add(p)
+  for p in aports:
+    if p in m: continue
+    for q in [p+10000,p-10000]+list(range(p+1,p+400)):
+      if 0<q<65536 and q not in used: m[p]=q; used.add(q); break
+  return m
+
+def tunnel_push(mapping,host=None,port=None,user=None):
+  # (re)applies the exit-server side: NAT, the forwards {a_port: b_port} and the exit server's firewall
+  c=tconf(); host=host or c.get("TUN_HOST",""); port=port or to_port(c.get("TUN_PORT",22)) or 22; user=user or c.get("TUN_USER","root")
+  ent=",".join("%d:%d"%(b,a) for a,b in sorted(mapping.items()))
+  pre="export SKIP_APT=1 REV_PORTS=%s\n"%ent
+  rc,o,er=_run(["ssh"]+_ssh_o(port)+[f"{user}@{host}","bash -s"],inp=pre+REMOTE_SCRIPT,t=120)
+  if rc!=0 or "SSHPLUS_REMOTE_OK" not in o: return False,{},[],"",(o.splitlines()[-1:] or [er or "failed"])[0][-200:]
+  okm={}; sk=[]; fw="none"
+  for l in o.splitlines():
+    if l.startswith("REV_OK:"):
+      for t in l.split(":",1)[1].split():
+        b,_,a=t.partition(":")
+        if a.isdigit() and b.isdigit(): okm[int(a)]=int(b)
+    elif l.startswith("REV_SKIPPED:"):
+      sk=[int(t.partition(":")[2]) for t in l.split(":",1)[1].split() if t.partition(":")[2].isdigit()]
+    elif l.startswith("FW_B:"): fw=l.split(":",1)[1].strip() or "none"
+  return True,okm,sk,fw,""
 
 def tunnel_route_apply(mode):
   c=tconf()
@@ -1137,11 +1236,26 @@ def tunnel_route_apply(mode):
   if mode=="reverse": mode="both"
   if mode not in ("forward","both"): return 400,{"ok":0,"msg":"Invalid routing mode"}
   ports=rev_ports() if mode=="both" else []
-  ok,sk,er=tunnel_push(ports)
+  mapping={}
+  if ports:
+    port=to_port(c.get("TUN_PORT",22)) or 22
+    mapping=rev_map_calc(ports,remote_listeners(c.get("TUN_HOST",""),port,c.get("TUN_USER","root")))
+  ok,okm,sk,fw,er=tunnel_push(mapping)
   if not ok: return 400,{"ok":0,"msg":"Exit server: "+er}
-  good=[x for x in ports if x not in sk]
-  c=tconf(); c["ROUTE"]=mode; c["REV_PORTS"]=",".join(map(str,good)); c["REV_SKIPPED"]=",".join(map(str,sk)); tconf_write(c)
-  return 200,{"ok":1,"ports":good,"skipped":sk}
+  c=tconf(); c["ROUTE"]=mode; c["REV_PORTS"]=",".join(map(str,sorted(okm)))
+  c["REV_MAP"]=",".join("%d:%d"%(a,b) for a,b in sorted(okm.items())); c["REV_SKIPPED"]=",".join(map(str,sk)); tconf_write(c)
+  return 200,{"ok":1,"map":[{"a":a,"b":b} for a,b in sorted(okm.items())],"skipped":sk,"fw_b":fw}
+
+def ports_sync():
+  # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
+  rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
+  pc=rjson(PORTS,{})
+  rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports())
+  if tconf().get("TUN_HOST"):
+    c,r=tunnel_route_apply("both")
+    if r.get("ok"): rep["map"]=r["map"]; rep["skipped"]=r["skipped"]; rep["fw_b"]=r.get("fw_b","none")
+    else: rep["err"]=r.get("msg","")
+  return 200,rep
 
 def tunnel_params(d):
   host=str(d.get("host","")).strip(); port=to_port(d.get("port") or 22); user=str(d.get("user") or "root").strip()
@@ -1177,7 +1291,7 @@ def tunnel_test():
 def tunnel_remove():
   if TS["run"]: return 409,{"ok":0,"msg":"Setup is running"}
   if tconf().get("TUN_HOST"):
-    try: tunnel_push([])                # take the forwarded ports back on the exit server
+    try: tunnel_push({})                # take the forwarded ports back on the exit server
     except Exception: pass
   _,io=on_map(True); n=0
   for u,(_,sh) in passwd_map().items():
@@ -1201,8 +1315,7 @@ def mon():
           if cmd(["systemctl","is-active",srv])[0]!=0:
             cmd(["systemctl","reset-failed",srv]); cmd(["systemctl","restart",srv])
       n+=1
-      if n==4 and tconf().get("TUN_HOST"):
-        threading.Thread(target=tunnel_route_apply,args=("both",),daemon=True).start()
+      if n==4: threading.Thread(target=ports_sync,daemon=True).start()     # once per panel start / update
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
       sessions,io_pids=on_map(True)
       um=user_uid_map(); sh=shadow_map(); lim=read_limits_db(); today=int(time.time()//86400)
@@ -1297,6 +1410,7 @@ class H(BaseHTTPRequestHandler):
         s.js({"ok":1 if ok else 0,"msg":msg,"bbr":bbr_state()},200 if ok else 400)
       elif p=="/api/tunnel/setup": c,r=tunnel_setup_start(d); s.js(r,c)
       elif p=="/api/tunnel/route": c,r=tunnel_route_apply(str(d.get("mode",""))); s.js(r,c)
+      elif p=="/api/tunnel/ports": c,r=ports_sync(); s.js(r,c)
       elif p=="/api/tunnel/restart": c,r=tunnel_restart(); s.js(r,c)
       elif p=="/api/tunnel/test": c,r=tunnel_test(); s.js(r,c)
       elif p=="/api/tunnel/remove": c,r=tunnel_remove(); s.js(r,c)
@@ -1369,7 +1483,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </head>
 <body>
 <div id="lBox" class="modal"><div class="card" style="width:100%;max-width:350px">
-  <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)">Panel Login</div></div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>
   <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
   <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
   <button class="btn" style="width:100%" onclick="login()">ورود / Login</button>
@@ -1380,8 +1494,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <input type="hidden" id="eu">
   <label>رمز جدید (خالی = بدون تغییر)</label><input id="epw" autocapitalize="none">
   <div style="display:flex;gap:.5rem">
-    <div style="flex:1"><label>In: به کدام سرور وصل شود</label><select id="een" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-    <div style="flex:1"><label>Out: با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+    <div style="flex:1"><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="een" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+    <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
@@ -1396,7 +1510,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div></div>
 
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;flex-wrap:wrap;gap:.5rem">
-  <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN</h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
+  <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN <span id="ver" class="bdg ok" style="font-size:.62rem;vertical-align:middle;letter-spacing:0" dir="ltr" title="Panel version">v__VERSION__</span></h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
   <div>
     <button class="btn btn-s" onclick="document.documentElement.dir=document.documentElement.dir==='rtl'?'ltr':'rtl'">FA / EN</button>
     <button class="btn btn-s" onclick="load(1)">🔄</button>
@@ -1425,8 +1539,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div class="row">
       <div><label>نام کاربری (انگلیسی)</label><input id="nu" placeholder="user1" autocapitalize="none"></div>
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
-      <div><label>In: به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-      <div><label>Out: با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -1439,7 +1553,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card" style="overflow-x:auto">
     <h3>📋 لیست کاربران</h3>
     <table>
-      <thead><tr><th>User / Pass</th><th>In → Out</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>User / Pass</th><th dir="ltr">In → Out</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody id="tb"></tbody>
     </table>
   </div>
@@ -1473,7 +1587,13 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card hid" id="tnBiBox">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">↔️ مسیر دوطرفه (همیشه فعال)</h3>
     <div id="tnBi" style="font-size:.85rem;line-height:1.9"></div>
-    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8">موقع ساخت اکانت، ادمین دو انتخاب <b>In</b> و <b>Out</b> دارد: In = کاربر به IP کدام سرور وصل شود، Out = با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (۱←۱، ۱←۲، ۲←۱، ۲←۲) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
+    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8">موقع ساخت اکانت، ادمین دو انتخاب <bdi dir="ltr"><b>In</b></bdi> و <bdi dir="ltr"><b>Out</b></bdi> دارد: <bdi dir="ltr"><b>In</b></bdi> یعنی کاربر به IP کدام سرور وصل شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (<span dir="ltr">1→1</span>، <span dir="ltr">1→2</span>، <span dir="ltr">2→1</span>، <span dir="ltr">2→2</span>) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
+  </div>
+  <div class="card hid" id="tnPortBox">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🔌 هماهنگی پورت‌ها و فایروال دو سرور</h3>
+    <div id="tnPorts" style="overflow-x:auto"></div>
+    <button class="btn btn-s" style="margin-top:.7rem" onclick="tunPorts()">🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور</button>
+    <div style="font-size:.75rem;color:var(--mu);margin-top:.5rem;line-height:1.8">اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.</div>
   </div>
   <div class="card" id="tnLogBox">
     <h3 style="margin-bottom:.6rem">📜 مراحل نصب</h3>
@@ -1481,11 +1601,11 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   </div>
   <div class="card" style="font-size:.82rem;line-height:1.9;color:var(--mu)">
     <h3 style="margin-bottom:.5rem;color:var(--tx)">ℹ️ نحوه‌ی کار</h3>
-    <b>In</b> = سروری که کاربر به IP آن وصل می‌شود. <b>Out</b> = سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
-    ۱) Out = سرور ۲: ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای Out = سرور ۱‌اند (پورت‌ها در تب تنظیمات قابل تغییرند).<br>
-    ۲) In = سرور ۲: پورت‌های این سرور روی سرور ۲ باز و از تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد دست نمی‌خورد، پس دسترسی ادمین به هر دو سرور و پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
+    <bdi dir="ltr"><b>In</b></bdi> یعنی سروری که کاربر به IP آن وصل می‌شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
+    ۱) وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد، ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای اکانت‌هایی‌اند که <bdi dir="ltr"><b>Out</b></bdi> آن‌ها «سرور ۱» است. پورت‌ها در تب تنظیمات قابل تغییرند.<br>
+    ۲) وقتی <bdi dir="ltr"><b>In</b></bdi> روی «سرور ۲» باشد، پورت‌های این سرور روی سرور ۲ باز می‌شوند و از داخل تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد هرگز دست نمی‌خورد؛ پس دسترسی ادمین به هر دو سرور و به پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
     ۳) اگر تانل قطع شود، هر مسیری که از تانل می‌گذرد <b>بسته</b> می‌شود (به‌جای نشت از IP مستقیم). برقراری مجدد خودکار است.<br>
-    ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند؛ برای Out = سرور ۲ از تانل می‌گذرد. کلاینت همان 127.0.0.1:7300 را استفاده می‌کند.<br>
+    ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند. وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد از تانل می‌گذرد. کلاینت همان <span dir="ltr">127.0.0.1:7300</span> را استفاده می‌کند.<br>
     ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.
   </div>
 </div>
@@ -1556,6 +1676,7 @@ function swTab(t){
   if(t==="t") loadTun();
 }
 function srvName(v){return v==="B"?"S2":"S1"}
+function revMap(){const m={};(tnCfg.rev_map||[]).forEach(r=>{m[r.a]=r.b});return m}
 function routeBadge(x){
   const inH=x.en==="B"?(tnCfg.host||"S2"):location.hostname, outH=x.tm==="tunnel"?(tnCfg.exit||tnCfg.host||"S2"):location.hostname;
   return `<span class="bdg ${(x.en==="B"||x.tm==="tunnel")?"wn":"ok"}" title="In: ${esc(inH)} | Out: ${esc(outH)}">${srvName(x.en)} → ${srvName(x.tm==="tunnel"?"B":"A")}</span>`;
@@ -1571,7 +1692,7 @@ function fillPorts(cn,ce){
   const sk=tnCfg.rev_skipped||[];
   const mk=(en,ex)=>{
     const db=(ex==="B"?(pCfg.tdb||[]):(pCfg.db||[]));
-    if(en==="B"){const s2=(pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]; return portOpts(s2.filter(p=>!sk.includes(p)),db.filter(p=>!sk.includes(p)))}
+    if(en==="B"){const mp=revMap(), s2=(pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]; return portOpts(s2.map(p=>mp[p]).filter(Boolean),db.map(p=>mp[p]).filter(Boolean))}
     return portOpts((pCfg.ssh_all&&pCfg.ssh_all.length)?pCfg.ssh_all:[22],db);
   };
   const n=cn!==undefined?cn:$("npt").value, e=ce!==undefined?ce:$("ept").value;
@@ -1687,7 +1808,7 @@ function copyU(u){
   const host=inB?(tnCfg.host||"?"):location.hostname;
   const exitIp=out?(tnCfg.exit||tnCfg.host||"server 2"):location.hostname;
   let ssh=pCfg.ssh_all||[22], dbl=out?(pCfg.tdb||[]):(pCfg.db||[]);
-  if(inB){ssh=((pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]).filter(p=>!sk.includes(p)); dbl=dbl.filter(p=>!sk.includes(p))}
+  if(inB){const mp=revMap(); ssh=((pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]).map(p=>mp[p]).filter(Boolean); dbl=dbl.map(p=>mp[p]).filter(Boolean)}
   const t=`Host/IP: ${host}\nIn: ${inB?"Server 2":"Server 1"} | Out: ${out?"Server 2":"Server 1"} (exit IP: ${exitIp})\nSSH Ports: ${ssh.join(", ")||"-"}\nDropbear Ports: ${dbl.join(", ")||"-"}\nUser: ${x.u}\nPass: ${x.pw}\nLimit: ${x.lim}\nQuota: ${x.q>0?x.q+" GB":"Unlimited"}\nUDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
   if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>alert("Copied!"),()=>prompt("Copy:",t)); else prompt("Copy:",t);
 }
@@ -1698,10 +1819,17 @@ async function loadTun(){
   $("tnInfo").innerHTML=d.conf?`سرور خروجی: <b dir="ltr">${esc(d.user)}@${esc(d.host)}:${esc(d.port)}</b><br>IP خروجی: <b dir="ltr">${esc(d.exit||"—")}</b><br>پورت‌های Dropbear تانل: <b dir="ltr">${esc((d.tdb||[]).join(", ")||"—")}</b><br>اکانت‌های تانل: <b>${(d.users||[]).length}</b>`:"هنوز تانلی تنظیم نشده. فرم کناری را پر کن.";
   $("tnBtns").classList.toggle("hid",!d.conf);
   $("tnBiBox").classList.toggle("hid",!d.conf);
+  $("tnPortBox").classList.toggle("hid",!d.conf);
+  if(d.conf){
+    const kind=p=>(pCfg.tdb||[]).includes(p)?"Dropbear تانل":((pCfg.db||[]).includes(p)?"Dropbear":"SSH دوم");
+    const rows=(d.rev_map||[]).map(r=>`<tr><td dir="ltr">${r.a}</td><td>${kind(r.a)}</td><td dir="ltr">${r.b}</td><td>${r.a===r.b?'<span class="bdg ok">هم‌شماره</span>':'<span class="bdg wn">جابه‌جا شد (مشغول بود)</span>'}</td></tr>`)
+      .concat((d.rev_skipped||[]).map(p=>`<tr><td dir="ltr">${p}</td><td>${kind(p)}</td><td>—</td><td><span class="bdg er">منتشر نشد</span></td></tr>`)).join("");
+    $("tnPorts").innerHTML=`<table><thead><tr><th>پورت سرور ۱</th><th>نوع</th><th>پورت روی سرور ۲</th><th>وضعیت</th></tr></thead><tbody>${rows||'<tr><td colspan="4" style="color:var(--mu)">هنوز پورتی منتشر نشده</td></tr>'}</tbody></table>`;
+  }
   if(d.conf){
     const me=location.hostname;
     $("tnBi").innerHTML=`<div>سرور ۱ (این سرور): <b dir="ltr">${esc(me)}</b> &nbsp;|&nbsp; سرور ۲: <b dir="ltr">${esc(d.host)}</b> <span style="color:var(--mu)">(IP خروجی: <span dir="ltr">${esc(d.exit||d.host)}</span>)</span></div>`
-      +`<div>پورت‌هایی که روی سرور ۲ به این سرور فوروارد شده‌اند: <b dir="ltr">${esc((d.rev_ports||[]).join(", ")||"—")}</b></div>`
+      +`<div>پورت‌هایی که روی سرور ۲ به این سرور فوروارد شده‌اند: <b dir="ltr">${esc((d.rev_map||[]).map(r=>r.b).join(", ")||"—")}</b></div>`
       +((d.rev_skipped||[]).length?`<div style="color:var(--wn)">⚠️ این پورت‌ها روی سرور ۲ از قبل مشغول‌اند و فوروارد نشدند: <b dir="ltr">${esc(d.rev_skipped.join(", "))}</b></div>`:"");
   }
   $("tnGo").disabled=run; $("tnGo").innerText=run?"⏳ در حال نصب...":(d.conf?"♻️ نصب مجدد / تغییر سرور":"⚡ نصب و برقراری تانل");
@@ -1718,6 +1846,15 @@ async function tunSetup(){
   if(!r.ok){alert(r.msg||"Error");return}
   $("tnW").value=""; loadTun();
 }
+async function tunPorts(){
+  const r=await api("/api/tunnel/ports","POST",{}); const m=[];
+  (r.a_changes||[]).forEach(c=>m.push(`سرور ۱: پورت ${c.from} (مشغول توسط ${c.by||"برنامه‌ی دیگر"}) ← ${c.to}`));
+  (r.map||[]).filter(x=>x.a!==x.b).forEach(x=>m.push(`سرور ۲: پورت ${x.a} مشغول بود ← منتشر شد روی ${x.b}`));
+  if(!m.length) m.push("تداخلی پیدا نشد.");
+  m.push(`فایروال سرور ۱: ${r.fw_a||"-"} | سرور ۲: ${r.fw_b||"-"}`);
+  if(r.err) m.push("خطا: "+r.err);
+  alert(m.join("\n")); load(1); loadTun();
+}
 async function tunTest(){const r=await api("/api/tunnel/test","POST",{}); alert(r.ok?("تانل سالم است. IP خروجی: "+r.ip):(r.msg||"Error")); loadTun()}
 async function tunRestart(){const r=await api("/api/tunnel/restart","POST",{}); alert(r.ok?"ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین":(r.msg||"Error")); loadTun()}
 async function tunRemove(){
@@ -1732,13 +1869,16 @@ setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secT").classLi
 </body>
 </html>
 HTMLEOF
+sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
 
 # firewall: only if ufw is active
+FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))')"
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
-  for p in $(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 \
-           $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))'); do
-    ufw allow "${p}/tcp" >/dev/null 2>&1
-  done
+  for p in $FWP; do ufw allow "${p}/tcp" >/dev/null 2>&1; done
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+  for p in $FWP; do firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1; done
+  firewall-cmd --reload >/dev/null 2>&1
 fi
 
 systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net sshplus-tunnel badvpn badvpn-t 2>/dev/null || true
