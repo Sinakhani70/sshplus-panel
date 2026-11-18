@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.1.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.1.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.1.0"
+VERSION="1.1.1"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -26,8 +26,10 @@ echo ">>> [1/4] Base system, BBR, BadVPN"
 mkdir -p /opt/sshplus-panel /etc/SSHPlus /etc/dropbear /var/log/sshplus
 echo "== install $(date)" >> $LOG
 
-apt-get update -y >>$LOG 2>&1
-apt-get install -y python3 curl git cmake build-essential dropbear-bin openssh-server openssh-client sshpass iptables iproute2 psmisc procps kmod >>$LOG 2>&1
+# 1) package index update (prerequisite)  2) curl  3) everything else
+apt-get update -y >>$LOG 2>&1 || echo "WARN: apt-get update ناموفق بود (لاگ: $LOG)"
+apt-get install -y curl >>$LOG 2>&1
+apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server openssh-client sshpass iptables iproute2 psmisc procps kmod >>$LOG 2>&1
 for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables; do
   command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
 done
@@ -823,12 +825,13 @@ IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}$")
 # executed on the exit server (stdin of "bash -s")
 REMOTE_SCRIPT=r'''set -e
 export DEBIAN_FRONTEND=noninteractive
+command -v apt-get >/dev/null 2>&1 && apt-get update -y -qq >/dev/null 2>&1 || true
 need=""
 command -v ip >/dev/null 2>&1 || need="$need iproute2"
 command -v iptables >/dev/null 2>&1 || need="$need iptables"
 if [ -n "$need" ]; then
   command -v apt-get >/dev/null 2>&1 || { echo "missing:$need (apt-get not found)"; exit 11; }
-  (apt-get update -y -qq && apt-get install -y -qq $need) >/dev/null 2>&1 || { echo "cannot install:$need"; exit 11; }
+  apt-get install -y -qq $need >/dev/null 2>&1 || { echo "cannot install:$need"; exit 11; }
 fi
 mkdir -p /etc/ssh/sshd_config.d
 echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
@@ -958,6 +961,7 @@ def tunnel_setup_run(host,port,user,pw):
     ts_end(ok,_scrub(d,pw)); return ok is not False
   def f_tools():
     need=("ssh","ssh-keygen","sshpass","ip","iptables","curl","ping")
+    if shutil.which("apt-get",path=ENV["PATH"]): _run(["apt-get","update","-y"],t=300)   # prerequisite on this server
     if [c for c in need if not shutil.which(c,path=ENV["PATH"])]:
       _run(["apt-get","install","-y","sshpass","openssh-client","iproute2","iptables","curl","iputils-ping"],t=300)
     miss=[c for c in need if not shutil.which(c,path=ENV["PATH"])]
