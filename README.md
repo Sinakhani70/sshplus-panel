@@ -105,7 +105,7 @@ Users connect to this server (server 1). The exit server (server 2) is only used
 
 ### Panel features
 
-**Subscription page and QR** — every account has a secret link `https://HOST:2053/s/<token>` (button 🔗 in the account list): a login-free page with expiry, usage, connection info (follows In/Out and port mapping), an `ssh://` link and a QR code. Wrong tokens are rate-limited per IP.
+**Subscription page and QR** — every account has a secret link `https://HOST:2053/s/<token>` (button 🔗 in the account list): a login-free page with expiry, usage, connection info (follows In/Out and port mapping), an `ssh://` link and a QR code. Wrong tokens are rate-limited per IP. The same link also works for **apps**: browsers get the page, apps get the standard subscription list (base64 of `ssh://` links, with usage/expiry headers); force a format with `?fmt=plain|b64|html` (`?auth=b64` for the base64-login variant). If an app rejects the self-signed certificate, install a real certificate or enable the optional plain-HTTP subscription URL in Settings → HTTPS (the password is inside the link, so use it only if needed).
 
 **Templates and bulk creation** — save the create form as a template and apply it later. *Bulk creation*: prefix + count (1–200) + days/quota/limit/In/Out; random passwords (or one shared password); copy or download the result as CSV; name collisions are reported per account.
 
@@ -294,7 +294,7 @@ Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must ch
 
 ### امکانات پنل
 
-**صفحه‌ی اشتراک و QR** — هر اکانت یک لینک مخصوص `https://HOST:2053/s/<token>` دارد (دکمه‌ی 🔗 در لیست): صفحه‌ای بدون نیاز به ورود با انقضا، مصرف، اطلاعات اتصال (مطابق In/Out و نگاشت پورت)، لینک `ssh://` و QR. توکن غلط برای هر IP محدودیت تعداد دارد.
+**صفحه‌ی اشتراک و QR** — هر اکانت یک لینک مخصوص `https://HOST:2053/s/<token>` دارد (دکمه‌ی 🔗 در لیست): صفحه‌ای بدون نیاز به ورود با انقضا، مصرف، اطلاعات اتصال (مطابق In/Out و نگاشت پورت)، لینک `ssh://` و QR. توکن غلط برای هر IP محدودیت تعداد دارد. همین لینک برای **برنامه‌ها** هم کار می‌کند: مرورگر صفحه را می‌گیرد و برنامه فهرست استاندارد اشتراک را (base64 از لینک‌های `ssh://` همراه سربرگ مصرف/انقضا)؛ با `?fmt=plain|b64|html` قالب را اجباری کن (`?auth=b64` برای حالت base64 در بخش ورود). اگر برنامه گواهی self-signed را رد کرد، گواهی معتبر نصب کن یا گزینه‌ی اختیاری «لینک اشتراک روی HTTP ساده» را در تنظیمات ← HTTPS روشن کن (رمز داخل لینک است؛ فقط در صورت نیاز).
 
 **قالب و ساخت دسته‌ای** — فرم ساخت اکانت را به‌عنوان قالب ذخیره و بعداً اعمال کن. *ساخت دسته‌ای*: پیشوند + تعداد (۱ تا ۲۰۰) + روز/حجم/همزمان/In/Out؛ رمز تصادفی (یا یک رمز مشترک)؛ نتیجه قابل کپی و دانلود CSV است؛ تداخل نام برای هر اکانت جداگانه گزارش می‌شود.
 
