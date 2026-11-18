@@ -94,7 +94,9 @@ Send selected accounts out through a second "exit" server. Users still connect t
 	•	Create user → "Account type": Direct or Tunnel (can be changed later when editing the user).
 	•	Tunnel accounts work on the OpenSSH ports and on dedicated "Tunnel Dropbear" ports (default 2087 and 2096, changeable in Settings). The normal Dropbear ports accept only Direct accounts; the tunnel Dropbear ports accept only Tunnel accounts.
 	•	Fail-closed: if the tunnel is down, Tunnel accounts get no connectivity at all (they never leak out through this server's IP). The tunnel reconnects automatically.
-	•	Limits: UDPGW (BadVPN) traffic still leaves from this server; the tunnel is IPv4-only (IPv6 is blocked for Tunnel accounts); the tunnel runs over TCP/SSH so keep BBR on for both servers; one exit server at a time; the exit server must be Linux with systemd and allow root SSH login with a password for the one-time setup; needs cgroup v2 (Ubuntu 22.04/24.04).
+	•	Routing (new in v1.2.0): Tunnel tab → "Routing" lets you choose which IP users connect to and which IP they leave with: (1) enter with this server's IP, leave with the exit server's IP (Tunnel accounts); (2) enter with the exit server's IP, leave with this server's IP (the panel's Direct accounts are reachable on the exit server's IP through the tunnel; the exit server forwards this server's Dropbear ports and never touches port 22 or any port it already listens on, so admin access to both servers and the panel stays open); (3) both. Make sure the exit server's firewall allows the forwarded ports; users' real IPs are not visible on this server in mode 2.
+	•	UDPGW (BadVPN, games/calls) of Tunnel accounts goes through the tunnel as well: a second badvpn instance on UDP port+1 runs in the tunnel path and connections to 127.0.0.1:7300 are redirected to it transparently, so clients keep the same setting.
+	•	Limits: the tunnel is IPv4-only (IPv6 is blocked for Tunnel accounts); the tunnel runs over TCP/SSH so keep BBR on for both servers; one exit server at a time; the exit server must be Linux with systemd and allow root SSH login with a password for the one-time setup; needs cgroup v2 (Ubuntu 22.04/24.04).
 
 Security notes
 
@@ -107,9 +109,9 @@ Security notes
 
 Uninstall
 
-systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn
+systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
-rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service
+rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
 rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
@@ -212,8 +214,9 @@ sysctl net.ipv4.tcp_congestion_control
 	•	ساخت کاربر ← «نوع اکانت»: مستقیم (Direct) یا تانل (Tunnel). بعداً هم در ویرایش کاربر قابل تغییر است.
 	•	اکانت تانل روی پورت‌های OpenSSH و پورت‌های اختصاصی «Dropbear تانل» (پیش‌فرض ۲۰۸۷ و ۲۰۹۶؛ از تب تنظیمات قابل تغییر) کار می‌کند. پورت‌های Dropbear معمولی فقط اکانت مستقیم می‌پذیرند و پورت‌های Dropbear تانل فقط اکانت تانل.
 	•	Fail-closed: اگر تانل قطع شود، اکانت‌های تانل اصلاً اینترنت ندارند (هرگز با IP همین سرور نشت نمی‌کنند). تانل خودکار دوباره وصل می‌شود.
-	•	محدودیت‌ها: ترافیک UDPGW (بدی‌وی‌پی‌ان) هنوز از همین سرور خارج می‌شود؛ تانل فقط IPv4 است (IPv6 برای اکانت تانل بسته است)؛ تانل روی TCP/SSH است پس BBR را روی هر دو سرور روشن نگه دار؛ فعلاً یک سرور خروجی؛ سرور خروجی باید لینوکس با systemd باشد و برای نصب یک‌باره ورود root با رمز را بپذیرد؛ به cgroup v2 نیاز دارد (اوبونتو ۲۲.۰۴/۲۴.۰۴).
-
+	•	مسیردهی (جدید در نسخه ۱.۲.۰): در تب تانل بخش «مسیردهی» انتخاب می‌کنی کاربر با کدام IP وارد شود و با کدام IP خارج شود: ① ورود با IP این سرور و خروج با IP سرور دوم (اکانت‌های تانل)؛ ② ورود با IP سرور دوم و خروج با IP این سرور (اکانت‌های «مستقیم» پنل از طریق IP سرور دوم و داخل تانل در دسترس‌اند؛ سرور دوم پورت‌های Dropbear این سرور را فوروارد می‌کند و هرگز به پورت ۲۲ یا هر پورتی که خودش روی آن گوش می‌دهد دست نمی‌زند، پس دسترسی ادمین به هر دو سرور و پنل باز می‌ماند)؛ ③ هر دو. فایروال سرور دوم باید پورت‌های فوروارد‌شده را باز بگذارد؛ در حالت ۲ IP واقعی کاربر روی این سرور دیده نمی‌شود.
+	•	UDPGW (بازی/تماس) اکانت‌های تانل هم از داخل تانل می‌گذرد: یک نمونه‌ی دوم badvpn روی پورت UDPGW به‌علاوه‌ی ۱ در مسیر تانل اجرا می‌شود و اتصال به 127.0.0.1:7300 شفاف به آن هدایت می‌شود؛ پس تنظیم کلاینت عوض نمی‌شود.
+	•	محدودیت‌ها: تانل فقط IPv4 است (IPv6 برای اکانت تانل بسته است)؛ تانل روی TCP/SSH است پس BBR را روی هر دو سرور روشن نگه دار؛ فعلاً یک سرور خروجی؛ سرور خروجی باید لینوکس با systemd باشد و برای نصب یک‌باره ورود root با رمز را بپذیرد؛ به cgroup v2 نیاز دارد (اوبونتو ۲۲.۰۴/۲۴.۰۴).
 نکات امنیتی
 
 	•	پنل روی HTTP ساده و با رمز پیش‌فرض admin/admin بالا می‌آید. رمز را فوراً عوض کن. برای امنیت بیشتر، پورت 2053 را با فایروال محدود کن یا از طریق تونل SSH واردش شو.
@@ -225,9 +228,9 @@ sysctl net.ipv4.tcp_congestion_control
 
 حذف
 
-systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn
+systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
-rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service
+rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
 rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw

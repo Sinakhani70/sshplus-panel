@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.0 — Routing and UDPGW in the tunnel
+
+### New
+- **Routing** card in the Tunnel tab: choose which IP users connect to and which IP they leave with.
+  1. enter with this server's IP, leave with the exit server's IP (Tunnel accounts, as before);
+  2. **enter with the exit server's IP, leave with this server's IP**: the exit server forwards this server's Dropbear ports (and the 2nd OpenSSH port) through the tunnel; the accounts are the normal Direct accounts of this panel, so quota, expiry and concurrent-login limits keep working;
+  3. both.
+  Admin access stays open: port 22 and every port the exit server already listens on are never taken over (they are reported as skipped), the panel is untouched. The forwards follow port changes in Settings automatically, survive an exit-server reboot, and are removed when the tunnel is removed. The "copy" button of a Direct account also shows the exit-server entry address when mode 2/3 is on.
+  In mode 2 (only) creating new Tunnel accounts is disabled.
+- **UDPGW (BadVPN) for games/calls now goes through the tunnel for Tunnel accounts.** A second badvpn instance (UDP port + 1) runs in the tunnel routing path; connections of Tunnel accounts to `127.0.0.1:7300` are transparently redirected to it (per-user for OpenSSH, per-cgroup for tunnel Dropbear), so clients keep the same UDPGW setting. Fail-closed like everything else: tunnel down = no UDP either. Direct accounts keep using the normal instance.
+- Dashboard shows a warning if the tunnel UDPGW instance is stopped; the monitor restarts it.
+- Copy button no longer throws when the browser refuses clipboard access (falls back to a prompt).
+
+### Notes
+- In mode 2 the real client IP is not visible on this server (it sees the exit server). Open the forwarded ports in the exit server's firewall / security group.
+- BadVPN's port+1 is reserved for the tunnel instance; the panel refuses ports that would collide.
+
+### How it was tested
+Same two-server lab as v1.1: UDP path checked with a stand-in UDPGW that sends a real UDP datagram to an "internet" echo server (direct accounts leave with this server's IP, Tunnel accounts on OpenSSH and on tunnel Dropbear with the exit server's IP, tunnel down = blocked); mode 2/3: clients entering through the exit server's IP leave with this server's IP, ports busy on the exit server are skipped, admin SSH to the exit server stays reachable, port change re-applies, exit-server reboot restores the rules, tunnel down = refused, mode switch and tunnel removal clean up. The real `badvpn-udpgw` binary was not run in the lab (only the stand-in), and the IPv6 branch is still untested.
+
 ## v1.1.1
 - Base install: `apt-get update` first, then `curl`, then all other packages.
 - Tunnel setup: `apt-get update` now always runs first on both servers (this one and the exit server) before any package is installed.
