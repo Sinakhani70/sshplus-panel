@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.5.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.5.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.5.0"
+VERSION="1.5.1"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -2636,7 +2636,7 @@ echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.
 echo "--- listening:"
 ss -tlnp | grep -E 'dropbear|badvpn|python3|sshd' | awk '{print $4, $6}'
 echo "Version:   $VERSION"
-echo "Panel URL: http://${IP}:2053  (admin / admin)"
+echo "Panel URL: https://${IP}:2053  (first login: admin / admin, you must change it)"
 echo "=========================================="
 }
 

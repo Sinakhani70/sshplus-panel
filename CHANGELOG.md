@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.1 — Documentation
+- README rewritten for v1.5 with proper Markdown structure (English + Persian): features, install/update, the HTTPS first login, the tunnel with In/Out and port coordination, backup, Telegram, subscription page, statistics, files, security notes and uninstall (including the exit server).
+- The installer's final line now prints `https://` and tells you the default password must be changed at the first login.
+
 ## v1.5.0 — Security, backups, Telegram, bulk accounts, subscription links, statistics
 
 ### 1. HTTPS and forced password change
