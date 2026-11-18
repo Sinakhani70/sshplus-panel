@@ -22,6 +22,7 @@ One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear +
 - Create, edit, delete accounts; traffic quota (GB), expiry date, simultaneous-login limit.
 - Account **templates** and **bulk creation** (1–200 accounts, random or shared passwords, CSV export).
 - Per-account **subscription page + QR code**.
+- **English / Persian interface**: the language button (top right, also on the login screen) switches the whole panel and its direction; the choice is remembered. The subscription page has the same switch (`?lang=en`).
 - Live online users, CPU / RAM / network, **statistics tab** (tunnel health, load, daily traffic, top users).
 - Change SSH, Dropbear and BadVPN ports, turn BBR on/off, one-click copy of connection info.
 
@@ -62,7 +63,7 @@ Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)
 BadVPN:    active   (tunnel instance: active)
 SSH:       active
 BBR:       bbr / fq
-Version:   1.5.1
+Version:   1.6.0
 Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must change it)
 ```
 
@@ -210,6 +211,7 @@ Use this software only on servers you own or administer, and in accordance with 
 - ساخت، ویرایش و حذف اکانت؛ سهمیه‌ی حجم (GB)، تاریخ انقضا، محدودیت اتصال همزمان.
 - **قالب** و **ساخت دسته‌ای** اکانت (۱ تا ۲۰۰ اکانت، رمز تصادفی یا مشترک، خروجی CSV).
 - **صفحه‌ی اشتراک و QR** برای هر اکانت.
+- **رابط انگلیسی / فارسی**: دکمه‌ی زبان (بالا سمت چپ و در صفحه‌ی ورود) کل پنل و جهت صفحه را عوض می‌کند و انتخابت به خاطر سپرده می‌شود. صفحه‌ی اشتراک هم همین دکمه را دارد (`?lang=en`).
 - نمایش زنده‌ی کاربران آنلاین و مصرف CPU / RAM / شبکه، **تب آمار** (سلامت تانل، بار سرور، مصرف روزانه، پرمصرف‌ترین‌ها).
 - تغییر پورت‌های SSH، Dropbear و BadVPN، روشن/خاموش کردن BBR، کپی سریع مشخصات اتصال.
 
@@ -250,7 +252,7 @@ Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)
 BadVPN:    active   (tunnel instance: active)
 SSH:       active
 BBR:       bbr / fq
-Version:   1.5.1
+Version:   1.6.0
 Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must change it)
 ```
 
