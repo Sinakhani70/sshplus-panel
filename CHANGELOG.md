@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.0 — Bidirectional by default, In/Out per account, CK.VPN UI
+
+### New
+- **Bidirectional by default**: setting up the tunnel automatically publishes this server's ports (normal Dropbear, tunnel Dropbear, 2nd OpenSSH port) on the exit server. No routing mode to configure; the "Routing" card of v1.2.0 is gone from the Tunnel tab (it is replaced by a read-only summary of the forwarded ports). Existing installs are migrated automatically when the panel starts.
+- **In / Out per account**: when creating or editing an account the admin chooses **In** (server 1 = this server, server 2 = exit server) and **Out** (whose IP the user leaves with). All four combinations work (1→1, 1→2, 2→1, 2→2). A live hint shows the real IPs, the port list follows the choice, the user table has an "In → Out" column, and the copy button gives the right host/ports. Changing In/Out cuts the user's live sessions.
+- **UDPGW works on every combination**; for Out = server 2 it goes through the tunnel (as in v1.2.0). Verified for TCP and UDP on all four.
+- **CK.VPN branding**: new name and logo in the login box, header, page title and favicon.
+
+### Notes
+- Entry via server 2 is "published", not enforced: the same account can also connect straight to server 1's ports (Dropbear cannot filter by source). The Out side is enforced.
+- Users entering through server 2 are seen by this server with the exit server's address, and the exit server's firewall must allow the forwarded ports.
+- Port 22 and ports the exit server already listens on are never forwarded (admin access stays open).
+
+### How it was tested
+Two-server lab: TCP and UDPGW checked on all four In/Out combinations (including the 2→2 hairpin and OpenSSH vs Dropbear ports); the wrong Dropbear instance is still refused; UI checked in a real browser (branding, In/Out selects, hint, ports per choice, table, copy text, no JS errors). Not covered: the real `badvpn-udpgw` binary (stand-in used), real systemd, the IPv6 branch.
+
 ## v1.2.0 — Routing and UDPGW in the tunnel
 
 ### New
