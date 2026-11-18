@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.1 — UI polish
+- The panel version is shown next to the logo (header and login box), so you can see which version is installed. It is taken from the installer's `VERSION`, so the two can never disagree.
+- The "How it works" / bidirectional texts in the Tunnel tab were rewritten for In/Out and no longer scramble in right-to-left layout (`In`/`Out` and the 1→2 style combinations are isolated; no more `=` / `:` that flipped).
+- Note: if the Tunnel tab still says "UDPGW still leaves from this server", that server runs an old version — run the install command again.
+
 ## v1.3.0 — Bidirectional by default, In/Out per account, CK.VPN UI
 
 ### New

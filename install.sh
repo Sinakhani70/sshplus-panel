@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.3.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.3.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.3.0"
+VERSION="1.3.1"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -1369,7 +1369,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </head>
 <body>
 <div id="lBox" class="modal"><div class="card" style="width:100%;max-width:350px">
-  <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)">Panel Login</div></div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>
   <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
   <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
   <button class="btn" style="width:100%" onclick="login()">ورود / Login</button>
@@ -1380,8 +1380,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <input type="hidden" id="eu">
   <label>رمز جدید (خالی = بدون تغییر)</label><input id="epw" autocapitalize="none">
   <div style="display:flex;gap:.5rem">
-    <div style="flex:1"><label>In: به کدام سرور وصل شود</label><select id="een" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-    <div style="flex:1"><label>Out: با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+    <div style="flex:1"><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="een" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+    <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
@@ -1396,7 +1396,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div></div>
 
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;flex-wrap:wrap;gap:.5rem">
-  <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN</h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
+  <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN <span id="ver" class="bdg ok" style="font-size:.62rem;vertical-align:middle;letter-spacing:0" dir="ltr" title="Panel version">v__VERSION__</span></h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
   <div>
     <button class="btn btn-s" onclick="document.documentElement.dir=document.documentElement.dir==='rtl'?'ltr':'rtl'">FA / EN</button>
     <button class="btn btn-s" onclick="load(1)">🔄</button>
@@ -1425,8 +1425,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div class="row">
       <div><label>نام کاربری (انگلیسی)</label><input id="nu" placeholder="user1" autocapitalize="none"></div>
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
-      <div><label>In: به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-      <div><label>Out: با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -1439,7 +1439,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card" style="overflow-x:auto">
     <h3>📋 لیست کاربران</h3>
     <table>
-      <thead><tr><th>User / Pass</th><th>In → Out</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>User / Pass</th><th dir="ltr">In → Out</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody id="tb"></tbody>
     </table>
   </div>
@@ -1473,7 +1473,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card hid" id="tnBiBox">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">↔️ مسیر دوطرفه (همیشه فعال)</h3>
     <div id="tnBi" style="font-size:.85rem;line-height:1.9"></div>
-    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8">موقع ساخت اکانت، ادمین دو انتخاب <b>In</b> و <b>Out</b> دارد: In = کاربر به IP کدام سرور وصل شود، Out = با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (۱←۱، ۱←۲، ۲←۱، ۲←۲) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
+    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8">موقع ساخت اکانت، ادمین دو انتخاب <bdi dir="ltr"><b>In</b></bdi> و <bdi dir="ltr"><b>Out</b></bdi> دارد: <bdi dir="ltr"><b>In</b></bdi> یعنی کاربر به IP کدام سرور وصل شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (<span dir="ltr">1→1</span>، <span dir="ltr">1→2</span>، <span dir="ltr">2→1</span>، <span dir="ltr">2→2</span>) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
   </div>
   <div class="card" id="tnLogBox">
     <h3 style="margin-bottom:.6rem">📜 مراحل نصب</h3>
@@ -1481,11 +1481,11 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   </div>
   <div class="card" style="font-size:.82rem;line-height:1.9;color:var(--mu)">
     <h3 style="margin-bottom:.5rem;color:var(--tx)">ℹ️ نحوه‌ی کار</h3>
-    <b>In</b> = سروری که کاربر به IP آن وصل می‌شود. <b>Out</b> = سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
-    ۱) Out = سرور ۲: ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای Out = سرور ۱‌اند (پورت‌ها در تب تنظیمات قابل تغییرند).<br>
-    ۲) In = سرور ۲: پورت‌های این سرور روی سرور ۲ باز و از تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد دست نمی‌خورد، پس دسترسی ادمین به هر دو سرور و پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
+    <bdi dir="ltr"><b>In</b></bdi> یعنی سروری که کاربر به IP آن وصل می‌شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
+    ۱) وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد، ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای اکانت‌هایی‌اند که <bdi dir="ltr"><b>Out</b></bdi> آن‌ها «سرور ۱» است. پورت‌ها در تب تنظیمات قابل تغییرند.<br>
+    ۲) وقتی <bdi dir="ltr"><b>In</b></bdi> روی «سرور ۲» باشد، پورت‌های این سرور روی سرور ۲ باز می‌شوند و از داخل تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد هرگز دست نمی‌خورد؛ پس دسترسی ادمین به هر دو سرور و به پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
     ۳) اگر تانل قطع شود، هر مسیری که از تانل می‌گذرد <b>بسته</b> می‌شود (به‌جای نشت از IP مستقیم). برقراری مجدد خودکار است.<br>
-    ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند؛ برای Out = سرور ۲ از تانل می‌گذرد. کلاینت همان 127.0.0.1:7300 را استفاده می‌کند.<br>
+    ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند. وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد از تانل می‌گذرد. کلاینت همان <span dir="ltr">127.0.0.1:7300</span> را استفاده می‌کند.<br>
     ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.
   </div>
 </div>
@@ -1732,6 +1732,7 @@ setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secT").classLi
 </body>
 </html>
 HTMLEOF
+sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
 
 # firewall: only if ufw is active
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
