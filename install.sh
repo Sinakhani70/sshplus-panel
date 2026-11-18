@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.1.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
 #  Usage:
@@ -13,19 +14,21 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+VERSION="1.1.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
 
 # ------------------------------------------------------------------------------
 step1() {
+echo ">>> SSH Plus Panel v$VERSION"
 echo ">>> [1/4] Base system, BBR, BadVPN"
 mkdir -p /opt/sshplus-panel /etc/SSHPlus /etc/dropbear /var/log/sshplus
 echo "== install $(date)" >> $LOG
 
 apt-get update -y >>$LOG 2>&1
-apt-get install -y python3 curl git cmake build-essential dropbear-bin openssh-server iptables iproute2 psmisc procps kmod >>$LOG 2>&1
-for c in python3 dropbear dropbearkey cmake git; do
+apt-get install -y python3 curl git cmake build-essential dropbear-bin openssh-server openssh-client sshpass iptables iproute2 psmisc procps kmod >>$LOG 2>&1
+for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables; do
   command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
 done
 
@@ -37,7 +40,7 @@ done
 rm -f /usr/local/bin/start-sshplus-tls.sh /usr/local/bin/sshplus-ws.py /usr/local/bin/sshplus-cert.sh
 pkill -f /usr/local/bin/sshplus-ws.py 2>/dev/null || true
 systemctl disable --now dropbear >/dev/null 2>&1 || true
-for s in sshplus-dropbear badvpn sshplus-panel; do systemctl stop $s >/dev/null 2>&1 || true; done
+for s in sshplus-dropbear sshplus-dropbear-t badvpn sshplus-panel; do systemctl stop $s >/dev/null 2>&1 || true; done
 
 # kernel tuning
 cat > /etc/sysctl.d/98-sshplus.conf <<'EOF'
@@ -67,7 +70,14 @@ trap 'kill $! 2>/dev/null; exit 0' HUP TERM
 while true; do sleep 3600 & wait $!; done
 EOF
 chmod 755 /usr/local/bin/sshplus-shell
-grep -qxF "/usr/local/bin/sshplus-shell" /etc/shells || echo "/usr/local/bin/sshplus-shell" >> /etc/shells
+# tunnel accounts use their own shell (same behaviour); the shell tells which Dropbear instance accepts the account
+install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t
+for sh in /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t; do
+  grep -qxF "$sh" /etc/shells || echo "$sh" >> /etc/shells
+done
+# per-instance /etc/shells (bind-mounted into each Dropbear service): direct instance rejects tunnel accounts and vice versa
+grep -vxF /usr/local/bin/sshplus-shell-t /etc/shells > /etc/SSHPlus/shells.direct
+grep -vxF /usr/local/bin/sshplus-shell   /etc/shells > /etc/SSHPlus/shells.tunnel
 
 # quick admin password change from terminal
 cat > /usr/local/bin/sshplus-pass <<'EOF'
@@ -102,6 +112,7 @@ fi
 touch /root/users.db
 
 # ports.json: create or top-up to 6 Dropbear ports (SSH ports such as 9011 stay reserved)
+# + "tdb": Dropbear ports reserved for tunnel accounts
 python3 - <<'PY'
 import json,os,subprocess
 p="/etc/SSHPlus/ports.json"
@@ -113,13 +124,23 @@ try:
     for l in o.splitlines():
         if l.startswith("port "): res.add(int(l.split()[1]))
 except Exception: pass
+old_t=[]
+for x in d.get("tdb",[]):
+    try: v=int(x)
+    except Exception: continue
+    if 0<v<65536 and v not in res and v not in old_t: old_t.append(v)
 db=[]
 for x in list(d.get("db",[]))+[442,444,8085,8443,10443,9443,8880,2083]:
     try: v=int(x)
     except Exception: continue
-    if 0<v<65536 and v not in res and v not in db: db.append(v)
-json.dump({"ssh":s1,"ssh2":s2,"db":db[:6]},open(p,"w"))
-print("Dropbear ports:",db[:6])
+    if 0<v<65536 and v not in res and v not in old_t and v not in db: db.append(v)
+db=db[:6]
+tdb=old_t[:4]
+for v in (2087,2096,4443,8444,2095):
+    if len(tdb)>=2: break
+    if v not in res and v not in db and v not in tdb: tdb.append(v)
+json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb},open(p,"w"))
+print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb)
 PY
 chmod 600 /etc/SSHPlus/panel.json /etc/SSHPlus/meta.json /root/users.db
 echo "=== STEP 1 OK ==="
@@ -165,25 +186,28 @@ if ! systemctl is-active --quiet ssh; then
   systemctl enable --now ssh.socket 2>/dev/null || true
 fi
 
-# Dropbear (up to 6 ports from ports.json)
+# Dropbear: "direct" instance (ports.json "db", up to 6) and "tunnel" instance (ports.json "tdb")
 cat > /usr/local/bin/start-dropbear.sh <<'EOF'
 #!/bin/bash
+MODE="${1:-direct}"
 mkdir -p /etc/dropbear
 for t in rsa ecdsa ed25519; do
   f="/etc/dropbear/dropbear_${t}_host_key"
   [ -s "$f" ] || dropbearkey -t "$t" -f "$f" >/dev/null 2>&1
 done
-P=$(python3 - <<'PY'
-import json
+P=$(python3 - "$MODE" <<'PY'
+import json,sys
+mode=sys.argv[1]; key="tdb" if mode=="tunnel" else "db"
+dflt="-p 2087" if mode=="tunnel" else "-p 442 -p 444"
 try:
     d=json.load(open("/etc/SSHPlus/ports.json")); out=[]
-    for x in d.get("db",[]):
+    for x in d.get(key,[]):
         try: v=int(x)
         except Exception: continue
         if 0<v<65536 and v not in (22,2053) and v not in out: out.append(v)
-    print(" ".join("-p %d"%p for p in out[:6]) or "-p 442 -p 444")
+    print(" ".join("-p %d"%p for p in out[:6]) or dflt)
 except Exception:
-    print("-p 442 -p 444")
+    print(dflt)
 PY
 )
 exec /usr/sbin/dropbear -F -E -w -K 30 \
@@ -192,6 +216,138 @@ exec /usr/sbin/dropbear -F -E -w -K 30 \
   -r /etc/dropbear/dropbear_ed25519_host_key $P
 EOF
 chmod 755 /usr/local/bin/start-dropbear.sh
+
+# ---- Tunnel: network helper (policy routing, fail-closed) ----
+# Tunnel accounts are routed into routing table 100:
+#   * OpenSSH accounts  -> "ip rule uidrange" (forwarding runs as the user)
+#   * Tunnel Dropbear   -> cgroup mark (Dropbear forwards as root, so uid cannot be used)
+# Table 100 always holds an "unreachable" default: if the tunnel is down, tunnel
+# accounts get NO connectivity instead of silently leaking out of this server.
+cat > /usr/local/bin/sshplus-tunnel-net <<'EOF'
+#!/bin/bash
+# usage: sshplus-tunnel-net boot|base|mark|up|down|sync|clean
+# IPv4: tunnel accounts are routed into the tunnel. IPv6: tunnel accounts get an "unreachable" route
+# (the tunnel is IPv4-only), so they can never leave through this server's own IPv6 address.
+TBL=100; MARK=0x64; PRIO_MARK=90; PRIO_SRC=91; PRIO_UID=100
+CG="system.slice/sshplus-dropbear-t.service"
+TUN_DEV=tun99; TUN_LOCAL=10.99.0.1
+[ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf
+V6=0; [ -s /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1 && V6=1
+ipt() { local t=$1 c=$2; shift 2; iptables -t "$t" -C "$c" "$@" 2>/dev/null || iptables -t "$t" -A "$c" "$@"; }
+ipt6() { local t=$1 c=$2; shift 2; ip6tables -t "$t" -C "$c" "$@" 2>/dev/null || ip6tables -t "$t" -A "$c" "$@"; }
+
+base() {
+  ip route replace unreachable default table $TBL metric 9999
+  ip rule show | grep -q "fwmark $MARK lookup $TBL" || ip rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
+  ip rule show | grep -q "from $TUN_LOCAL lookup $TBL" || ip rule add from $TUN_LOCAL lookup $TBL priority $PRIO_SRC
+  iptables -t mangle -N SSHPLUS_TUN 2>/dev/null
+  ipt mangle OUTPUT -j SSHPLUS_TUN
+  ipt nat POSTROUTING -o "$TUN_DEV" -j MASQUERADE
+  if [ "$V6" = 1 ]; then
+    ip -6 route replace unreachable default table $TBL metric 9999
+    ip -6 rule show | grep -q "fwmark $MARK lookup $TBL" || ip -6 rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
+    ip6tables -t mangle -N SSHPLUS_TUN 2>/dev/null
+    ipt6 mangle OUTPUT -j SSHPLUS_TUN
+  fi
+}
+mark() {
+  # the cgroup match is bound to the cgroup that exists NOW: re-apply it on every Dropbear (re)start
+  iptables -t mangle -N SSHPLUS_TUN 2>/dev/null
+  iptables -t mangle -F SSHPLUS_TUN
+  iptables -t mangle -A SSHPLUS_TUN -m cgroup --path "$CG" -j MARK --set-xmark $MARK/0xffffffff || return 1
+  if [ "$V6" = 1 ]; then
+    ip6tables -t mangle -N SSHPLUS_TUN 2>/dev/null
+    ip6tables -t mangle -F SSHPLUS_TUN
+    ip6tables -t mangle -A SSHPLUS_TUN -m cgroup --path "$CG" -j MARK --set-xmark $MARK/0xffffffff || return 1
+  fi
+}
+up() {
+  ip addr replace "$TUN_LOCAL/30" dev "$TUN_DEV"
+  ip link set "$TUN_DEV" mtu 1400 up
+  sysctl -qw "net.ipv4.conf.$TUN_DEV.rp_filter=0" 2>/dev/null
+  ip route replace default dev "$TUN_DEV" table $TBL metric 1
+}
+down() { ip route del default dev "$TUN_DEV" table $TBL metric 1 2>/dev/null; return 0; }
+sync() {
+python3 - "$TBL" "$PRIO_UID" <<'PY'
+import subprocess,sys
+tbl,prio=sys.argv[1],sys.argv[2]; SH="/usr/local/bin/sshplus-shell-t"
+want=set()
+for l in open("/etc/passwd"):
+    p=l.rstrip("\n").split(":")
+    if len(p)>=7 and p[6]==SH and p[2].isdigit(): want.add(int(p[2]))
+for fam in ("-4","-6"):
+    r=subprocess.run(["ip",fam,"-o","rule","show"],capture_output=True,text=True)
+    if r.returncode!=0: continue                      # IPv6 not available
+    have={}
+    for l in r.stdout.splitlines():
+        t=l.replace("\t"," ").split()
+        if t and t[0]==prio+":" and "uidrange" in t and "lookup" in t and t[t.index("lookup")+1]==tbl:
+            x=t[t.index("uidrange")+1]; a,_,b=x.partition("-")
+            if a==b and a.isdigit(): have[int(a)]=x
+    for u in sorted(want-set(have)): subprocess.run(["ip",fam,"rule","add","uidrange","%d-%d"%(u,u),"lookup",tbl,"priority",prio])
+    for u in sorted(set(have)-want): subprocess.run(["ip",fam,"rule","del","uidrange",have[u],"lookup",tbl,"priority",prio])
+PY
+}
+clean() {
+  for F in -4 -6; do
+    while ip $F rule del priority $PRIO_UID 2>/dev/null; do :; done
+    ip $F rule del priority $PRIO_MARK 2>/dev/null; ip $F rule del priority $PRIO_SRC 2>/dev/null
+    ip $F route flush table $TBL 2>/dev/null
+  done
+  for T in iptables ip6tables; do
+    command -v $T >/dev/null 2>&1 || continue
+    $T -t mangle -D OUTPUT -j SSHPLUS_TUN 2>/dev/null; $T -t mangle -F SSHPLUS_TUN 2>/dev/null; $T -t mangle -X SSHPLUS_TUN 2>/dev/null
+  done
+  iptables -t nat -D POSTROUTING -o "$TUN_DEV" -j MASQUERADE 2>/dev/null
+  return 0
+}
+case "$1" in
+  boot) base; sync ;;
+  base) base ;;
+  mark) mark ;;
+  up) up ;;
+  down) down ;;
+  sync) base; sync ;;
+  clean) clean ;;
+  *) echo "usage: $0 boot|base|mark|up|down|sync|clean"; exit 1 ;;
+esac
+EOF
+chmod 755 /usr/local/bin/sshplus-tunnel-net
+
+# ---- Tunnel: SSH tun link to the exit server (L3 tunnel over ssh -w) ----
+cat > /usr/local/bin/start-tunnel.sh <<'EOF'
+#!/bin/bash
+[ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf || { echo "tunnel.conf missing"; exit 1; }
+: "${TUN_DEV:=tun99}" "${TUN_ID:=99}" "${TUN_REMOTE:=10.99.0.2}"
+O=(-F /dev/null -i /etc/SSHPlus/tunnel_key -p "$TUN_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes
+   -o UserKnownHostsFile=/etc/SSHPlus/tunnel_known_hosts -o GlobalKnownHostsFile=/dev/null
+   -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=15)
+/usr/local/bin/sshplus-tunnel-net down
+ssh "${O[@]}" -N -w "${TUN_ID}:${TUN_ID}" "${TUN_USER}@${TUN_HOST}" &
+SP=$!
+trap 'kill $SP 2>/dev/null; exit 0' TERM INT
+for i in $(seq 1 30); do
+  ip link show "$TUN_DEV" >/dev/null 2>&1 && break
+  kill -0 $SP 2>/dev/null || { echo "ssh exited before the tunnel came up"; exit 1; }
+  sleep 1
+done
+ip link show "$TUN_DEV" >/dev/null 2>&1 || { echo "tunnel device did not appear"; kill $SP; exit 1; }
+/usr/local/bin/sshplus-tunnel-net up || { kill $SP; exit 1; }
+ssh "${O[@]}" "${TUN_USER}@${TUN_HOST}" "ip addr replace ${TUN_REMOTE}/30 dev ${TUN_DEV} && ip link set ${TUN_DEV} mtu 1400 up" \
+  || { echo "failed to configure the remote end"; kill $SP; exit 1; }
+wait $SP
+EOF
+chmod 755 /usr/local/bin/start-tunnel.sh
+
+cat > /usr/local/bin/sshplus-tunnel-setup <<'EOF'
+#!/bin/bash
+# terminal version of the panel's Tunnel tab (the password is typed here instead of going through the panel's plain HTTP)
+# usage: sshplus-tunnel-setup EXIT_SERVER_IP [SSH_PORT] [USER]
+[ -n "$1" ] || { echo "usage: sshplus-tunnel-setup EXIT_SERVER_IP [SSH_PORT=22] [USER=root]"; exit 1; }
+exec python3 /opt/sshplus-panel/app.py --tunnel-setup "$1" "${2:-22}" "${3:-root}"
+EOF
+chmod 755 /usr/local/bin/sshplus-tunnel-setup
 
 # BadVPN
 cat > /usr/local/bin/start-badvpn.sh <<'EOF'
@@ -214,16 +370,67 @@ chmod 755 /usr/local/bin/start-badvpn.sh
 # systemd units
 cat > /etc/systemd/system/sshplus-dropbear.service <<'EOF'
 [Unit]
-Description=SSH Plus Dropbear
+Description=SSH Plus Dropbear (direct accounts)
 After=network.target
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/start-dropbear.sh
+BindReadOnlyPaths=/etc/SSHPlus/shells.direct:/etc/shells
+ExecStart=/usr/local/bin/start-dropbear.sh direct
 Restart=always
 RestartSec=2
 LimitNOFILE=65535
 Nice=-5
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/sshplus-dropbear-t.service <<'EOF'
+[Unit]
+Description=SSH Plus Dropbear (tunnel accounts)
+After=network.target sshplus-tunnel-net.service
+Wants=sshplus-tunnel-net.service
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+BindReadOnlyPaths=/etc/SSHPlus/shells.tunnel:/etc/shells
+ExecStartPre=/usr/local/bin/sshplus-tunnel-net base
+ExecStart=/usr/local/bin/start-dropbear.sh tunnel
+ExecStartPost=/usr/local/bin/sshplus-tunnel-net mark
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+Nice=-5
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/sshplus-tunnel-net.service <<'EOF'
+[Unit]
+Description=SSH Plus tunnel routing rules (fail-closed)
+Before=ssh.service sshd.service sshplus-dropbear-t.service
+After=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sshplus-tunnel-net boot
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/sshplus-tunnel.service <<'EOF'
+[Unit]
+Description=SSH Plus Tunnel (link to the exit server)
+After=network-online.target sshplus-tunnel-net.service
+Wants=network-online.target sshplus-tunnel-net.service
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-tunnel.sh
+ExecStopPost=/usr/local/bin/sshplus-tunnel-net down
+Restart=always
+RestartSec=3
+KillMode=control-group
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -268,14 +475,14 @@ step3() {
 echo ">>> [3/4] Panel backend (app.py)"
 cat > /opt/sshplus-panel/app.py <<'PYEOF'
 #!/usr/bin/env python3
-import os, re, json, time, secrets, threading, subprocess
+import os, re, sys, json, time, shutil, getpass, secrets, threading, subprocess
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 CFG="/etc/SSHPlus/panel.json"; DB="/root/users.db"; META="/etc/SSHPlus/meta.json"
 PORTS="/etc/SSHPlus/ports.json"; BV="/etc/SSHPlus/badvpn.conf"
-BBRF="/etc/sysctl.d/99-sshplus-bbr.conf"; SHELL="/usr/local/bin/sshplus-shell"
+BBRF="/etc/sysctl.d/99-sshplus-bbr.conf"; SHELL="/usr/local/bin/sshplus-shell"; SHELL_T="/usr/local/bin/sshplus-shell-t"
 HTML="/opt/sshplus-panel/index.html"; SSHCONF="/etc/ssh/sshd_config.d/00-sshplus.conf"
 TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}
 STATE={"first":True}; CACHE={"t":0.0,"v":None}; SSHP={"t":0.0,"v":set()}
@@ -327,14 +534,17 @@ def ufw_open(ports):
   if rc==0 and o.startswith("Status: active"):
     for p in ports: cmd(["ufw","allow",f"{p}/tcp"])
 
-def user_uid_map():
+def passwd_map():
+  # panel accounts: name -> (uid, shell). shell SHELL = direct account, SHELL_T = tunnel account
   m={}
   try:
     for l in open("/etc/passwd"):
       p=l.strip().split(":")
-      if len(p)>=7 and p[2].isdigit() and int(p[2])>=1000 and p[6]==SHELL: m[p[0]]=int(p[2])
+      if len(p)>=7 and p[2].isdigit() and int(p[2])>=1000 and p[6] in (SHELL,SHELL_T): m[p[0]]=(int(p[2]),p[6])
   except Exception: pass
   return m
+
+def user_uid_map(): return {k:v[0] for k,v in passwd_map().items()}
 
 def shadow_map():
   m={}
@@ -384,7 +594,7 @@ def _on_map():
       if ppid>1 and ppid not in masters: io_pids[usr].add(ppid)
       if comm.startswith("sshd") or comm=="dropbear":
         sessions[usr].append(pid)
-      elif comm=="sshplus-shell":
+      elif comm.startswith("sshplus-shell"):
         sp=ppid if ppid>1 else pid
         if sp not in sessions[usr]: sessions[usr].append(sp)
     elif usr=="root" and comm.startswith("sshd"):
@@ -408,7 +618,7 @@ def _on_map():
   unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>15]
   if unknown:
     for p in unknown: DBT[p]=now
-    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-n","3000","--no-pager","-o","cat"],20)
+    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-n","3000","--no-pager","-o","cat"],20)
     for jl in j.splitlines():
       mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)'",jl)
       if mt: DBU[int(mt.group(1))]=mt.group(2)
@@ -472,10 +682,11 @@ def stats():
   return {"cpu":cpu,"mem":mem,"rx":round(rx/1048576,1),"tx":round(tx/1048576,1),
           "bv":cmd(["systemctl","is-active","badvpn"])[0]==0,
           "db":cmd(["systemctl","is-active","sshplus-dropbear"])[0]==0,
+          "dbt":cmd(["systemctl","is-active","sshplus-dropbear-t"])[0]==0,
           "on_tot":sum(len(v) for v in om.values()),"om":{k:len(v) for k,v in om.items()}}
 
 def get_users(om):
-  um=user_uid_map(); lim=read_limits_db(); meta=rjson(META,{}); sh=shadow_map()
+  pm=passwd_map(); um=pm; lim=read_limits_db(); meta=rjson(META,{}); sh=shadow_map()
   today=int(time.time()//86400); res=[]
   for u in sorted(um):
     hs,ex=sh.get(u,("",""))
@@ -485,7 +696,7 @@ def get_users(om):
     m=meta.get(u,{}); q=float(m.get("q",0)); ub=int(m.get("u",0))
     res.append({"u":u,"pw":m.get("pw",""),"lim":int(m.get("lim",lim.get(u,1))),"on":om.get(u,0),"exp":es,"dl":dl,
                 "expd":expd,"q":q,"ugb":fmt_traffic(ub),"qfull":(q>0 and ub>=int(q*1073741824)),
-                "pt":str(m.get("pt","All"))})
+                "pt":str(m.get("pt","All")),"tm":"tunnel" if pm[u][1]==SHELL_T else "direct"})
   return res
 
 def refresh_lock(u):
@@ -501,14 +712,22 @@ def user_save(d):
   q=max(0.0,float(d.get("q") or 0)); pt=str(d.get("pt","All"))[:40]
   if not NAME_RE.match(u) or u in ("root","admin","ubuntu","nobody"): return 400,{"ok":0,"msg":"Invalid username"}
   if ":" in pw or "\n" in pw: return 400,{"ok":0,"msg":"Invalid password"}
-  um=user_uid_map()
+  pm=passwd_map(); um=pm
   if edit and u not in um: return 404,{"ok":0,"msg":"User not found"}
   if not edit and not pw: return 400,{"ok":0,"msg":"Password required"}
   if not edit and days<=0: days=30
+  cur=pm.get(u,(0,SHELL))[1]; tmq=str(d.get("tm",""))
+  shl=SHELL_T if tmq=="tunnel" else (SHELL if tmq=="direct" else cur)       # account type = login shell
+  if shl==SHELL_T and cur!=SHELL_T and not tconf().get("TUN_HOST"):
+    return 400,{"ok":0,"msg":"Tunnel is not set up yet (open the Tunnel tab first)"}
   ea=["-e",(datetime.utcnow()+timedelta(days=days)).strftime("%Y-%m-%d")] if days>0 else []
-  if edit: rc,_,er=cmd(["usermod","-s",SHELL]+ea+[u])
-  else: rc,_,er=cmd(["useradd","-M","-s",SHELL]+ea+[u])
+  if edit: rc,_,er=cmd(["usermod","-s",shl]+ea+[u])
+  else: rc,_,er=cmd(["useradd","-M","-s",shl]+ea+[u])
   if rc!=0: return 400,{"ok":0,"msg":er or "Failed"}
+  if os.path.exists(TNET): cmd([TNET,"sync"])
+  if edit and shl!=cur:                       # type changed: cut live sessions so they reconnect on the right path
+    _,io=on_map(True)
+    for pid in io.get(u,[]): kill_pid(pid)
   if pw:
     r=subprocess.run(["chpasswd"],input=f"{u}:{pw}\n",text=True,capture_output=True,env=ENV)
     if r.returncode!=0:
@@ -533,6 +752,7 @@ def user_del(d):
   with ML:
     ls=read_limits_db(); ls.pop(u,None); write_limits_db(ls)
     meta=rjson(META,{}); meta.pop(u,None); wjson(META,meta)
+  if os.path.exists(TNET): cmd([TNET,"sync"])
   return 200,{"ok":1}
 
 # ---------- ports & BadVPN ----------
@@ -553,6 +773,14 @@ def apply_ports(d):
     else: dropped.append(str(x))
   db=db[:6]
   if not db: return 400,{"ok":0,"msg":"At least one valid Dropbear port is required"}
+  tdb=[]                                       # Dropbear ports of the tunnel instance
+  for x in (d["tdb"] if "tdb" in d else old.get("tdb",[])):
+    if str(x).strip()=="": continue
+    v=to_port(x)
+    if v and v not in reserved and v not in db and v not in tdb: tdb.append(v)
+    else: dropped.append(str(x))
+  tdb=tdb[:4]
+  if not tdb: return 400,{"ok":0,"msg":"At least one valid tunnel Dropbear port is required"}
   bak=open(SSHCONF).read() if os.path.exists(SSHCONF) else None
   lines=[f"Port {x}" for x in sorted(ssh_set)]+[
     "PasswordAuthentication yes","PermitRootLogin yes","UsePAM yes","AllowTcpForwarding yes",
@@ -563,16 +791,16 @@ def apply_ports(d):
   if rc!=0:
     if bak is not None: open(SSHCONF,"w").write(bak)
     return 400,{"ok":0,"msg":"sshd config invalid: "+er[:120]}
-  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db}); SSHP["t"]=0
-  ufw_open(ssh_set|set(db)|{panel})
+  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb}); SSHP["t"]=0
+  ufw_open(ssh_set|set(db)|set(tdb)|{panel})
   if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
-  cmd(["systemctl","restart","sshplus-dropbear"])
-  return 200,{"ok":1,"db":db,"dropped":dropped}
+  cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+  return 200,{"ok":1,"db":db,"tdb":tdb,"dropped":dropped}
 
 def save_bv(d):
   p=to_port(d.get("p")) or 7300
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[]})
-  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|sshd_ports()
+  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()
   if p in used: return 400,{"ok":0,"msg":"Port already used by SSH/Dropbear/panel"}
   m=min(max(int(float(d.get("m") or 1200)),576),1500)
   c=min(max(int(float(d.get("c") or 1000)),1),10000)
@@ -583,16 +811,271 @@ def save_bv(d):
   cmd(["systemctl","restart","badvpn"])
   return 200,{"ok":1}
 
+# ---------- tunnel ----------
+# Layer-3 SSH tunnel (ssh -w) between this server and an "exit" server.
+# Tunnel accounts are routed through it (see sshplus-tunnel-net), direct accounts are not.
+TCONF="/etc/SSHPlus/tunnel.conf"; TKEY="/etc/SSHPlus/tunnel_key"; TKH="/etc/SSHPlus/tunnel_known_hosts"
+TNET="/usr/local/bin/sshplus-tunnel-net"; TUN_DEV="tun99"; TUN_ID=99; TUN_LOCAL="10.99.0.1"; TUN_REMOTE="10.99.0.2"
+TS={"run":False,"steps":[],"ok":None}; TSL=threading.Lock(); CLI=[False]
+HOST_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"); TUSER_RE=re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}$")
+
+# executed on the exit server (stdin of "bash -s")
+REMOTE_SCRIPT=r'''set -e
+export DEBIAN_FRONTEND=noninteractive
+need=""
+command -v ip >/dev/null 2>&1 || need="$need iproute2"
+command -v iptables >/dev/null 2>&1 || need="$need iptables"
+if [ -n "$need" ]; then
+  command -v apt-get >/dev/null 2>&1 || { echo "missing:$need (apt-get not found)"; exit 11; }
+  (apt-get update -y -qq && apt-get install -y -qq $need) >/dev/null 2>&1 || { echo "cannot install:$need"; exit 11; }
+fi
+mkdir -p /etc/ssh/sshd_config.d
+echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
+CHK='^permittunnel (yes|point-to-point)'
+if ! sshd -T 2>/dev/null | grep -qiE "$CHK"; then
+  cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.sshplus.bak
+  sed -i '1i PermitTunnel yes' /etc/ssh/sshd_config
+fi
+if ! sshd -t 2>/dev/null; then
+  rm -f /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
+  [ -f /etc/ssh/sshd_config.sshplus.bak ] && cp -a /etc/ssh/sshd_config.sshplus.bak /etc/ssh/sshd_config
+  echo "sshd config invalid after change (rolled back)"; exit 12
+fi
+sshd -T 2>/dev/null | grep -qiE "$CHK" || { echo "PermitTunnel could not be enabled"; exit 12; }
+(systemctl reload ssh || systemctl reload sshd) >/dev/null 2>&1 || true
+printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/98-sshplus-exit.conf
+cat > /usr/local/bin/sshplus-exit.sh <<'XEOF'
+#!/bin/bash
+r() { t=$1; c=$2; shift 2; iptables -t "$t" -C "$c" "$@" 2>/dev/null || iptables -t "$t" -I "$c" "$@"; }
+sysctl -qw net.ipv4.ip_forward=1
+r nat POSTROUTING -s 10.99.0.0/30 ! -o tun99 -j MASQUERADE
+r filter FORWARD -i tun99 -j ACCEPT
+r filter FORWARD -o tun99 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+r mangle FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+XEOF
+chmod 755 /usr/local/bin/sshplus-exit.sh
+cat > /etc/systemd/system/sshplus-exit.service <<'XEOF'
+[Unit]
+Description=SSH Plus exit-server NAT for the tunnel
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sshplus-exit.sh
+[Install]
+WantedBy=multi-user.target
+XEOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable sshplus-exit.service >/dev/null 2>&1 || true
+/usr/local/bin/sshplus-exit.sh
+echo SSHPLUS_REMOTE_OK
+'''
+
+def tconf():
+  d={}
+  try:
+    for l in open(TCONF):
+      if "=" in l:
+        k,v=l.strip().split("=",1); d[k]=v
+  except Exception: pass
+  return d
+
+def tconf_write(d):
+  t=TCONF+".t"
+  with open(t,"w") as f: f.write("".join(f"{k}={v}\n" for k,v in d.items()))
+  os.chmod(t,0o600); os.replace(t,TCONF)
+
+def tun_users():
+  return sorted(u for u,(_,sh) in passwd_map().items() if sh==SHELL_T)
+
+def tunnel_status(full=False):
+  c=tconf(); conf=bool(c.get("TUN_HOST"))
+  svc=conf and cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0
+  up=bool(svc) and cmd(["ip","link","show",TUN_DEV])[0]==0
+  r={"conf":conf,"host":c.get("TUN_HOST",""),"port":to_port(c.get("TUN_PORT",22)) or 22,"user":c.get("TUN_USER",""),
+     "exit":c.get("EXIT_IP",""),"since":int(c.get("SINCE","0") or 0),"svc":bool(svc),"up":up}
+  if full:
+    if up:
+      r["up"]=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0
+    r["tdb"]=rjson(PORTS,{}).get("tdb",[]); r["users"]=tun_users(); r["setup"]=ts_snap()
+  return r
+
+# --- progress log of the one-click setup
+def ts_snap():
+  with TSL: return {"run":TS["run"],"ok":TS["ok"],"steps":[dict(x) for x in TS["steps"]]}
+
+def ts_begin(m):
+  with TSL: TS["steps"].append({"m":m,"s":"run","d":""})
+  if CLI[0]: print("  ... "+m,flush=True)
+
+def ts_end(ok,d=""):
+  st={True:"ok",False:"err","warn":"warn"}[ok]
+  with TSL:
+    if TS["steps"]: TS["steps"][-1]["s"]=st; TS["steps"][-1]["d"]=str(d)[:400]
+  if CLI[0]: print(f"      [{st.upper()}] {d}" if d else f"      [{st.upper()}]",flush=True)
+
+def _scrub(t,pw):
+  t=str(t or "")
+  return t.replace(pw,"***") if pw else t
+
+def _run(c,inp=None,env=None,t=60):
+  try:
+    r=subprocess.run(c,input=inp,capture_output=True,text=True,timeout=t,env=env or ENV)
+    return r.returncode,r.stdout.strip(),r.stderr.strip()
+  except Exception as e: return 1,"",str(e)
+
+def _ssh_o(port,key=True):
+  o=["-F","/dev/null","-p",str(port),"-o","LogLevel=ERROR","-o","ConnectTimeout=15","-o","ServerAliveInterval=10",
+     "-o","GlobalKnownHostsFile=/dev/null","-o","UserKnownHostsFile="+TKH]
+  if key: o+=["-i",TKEY,"-o","BatchMode=yes","-o","StrictHostKeyChecking=yes"]
+  else: o+=["-o","StrictHostKeyChecking=accept-new","-o","PubkeyAuthentication=no",
+            "-o","PreferredAuthentications=password,keyboard-interactive","-o","NumberOfPasswordPrompts=1"]
+  return o
+
+def tun_exit_ip():
+  urls=[os.environ["SSHPLUS_IPCHECK_URL"]] if os.environ.get("SSHPLUS_IPCHECK_URL") else \
+       ["https://api.ipify.org","https://ifconfig.me/ip","https://icanhazip.com"]
+  for u in urls:
+    rc,o,_=cmd(["curl","-s","--max-time","8","--interface",TUN_LOCAL,u],12)
+    if rc==0 and IP_RE.match(o.strip()): return o.strip()
+  return ""
+
+def tunnel_rollback():
+  cmd(["systemctl","disable","--now","sshplus-tunnel"])
+  for f in (TCONF,TKH):
+    try: os.remove(f)
+    except OSError: pass
+  cmd([TNET,"down"])
+
+def tunnel_setup_run(host,port,user,pw):
+  with TSL: TS["run"]=True; TS["steps"]=[]; TS["ok"]=None
+  tgt=f"{user}@{host}"; ctx={}
+  def S(m,fn):
+    ts_begin(m)
+    try: ok,d=fn()
+    except Exception as e: ok,d=False,str(e)
+    ts_end(ok,_scrub(d,pw)); return ok is not False
+  def f_tools():
+    need=("ssh","ssh-keygen","sshpass","ip","iptables","curl","ping")
+    if [c for c in need if not shutil.which(c,path=ENV["PATH"])]:
+      _run(["apt-get","install","-y","sshpass","openssh-client","iproute2","iptables","curl","iputils-ping"],t=300)
+    miss=[c for c in need if not shutil.which(c,path=ENV["PATH"])]
+    return (False,"missing: "+", ".join(miss)) if miss else (True,"")
+  def f_key():
+    if not os.path.exists(TKEY):
+      rc,_,er=_run(["ssh-keygen","-q","-t","ed25519","-N","","-f",TKEY,"-C","sshplus-tunnel"])
+      if rc!=0: return False,er
+    os.chmod(TKEY,0o600); ctx["pub"]=open(TKEY+".pub").read().strip()
+    return True,""
+  def f_login():
+    try: os.remove(TKH)
+    except OSError: pass
+    env=dict(ENV); env["SSHPASS"]=pw
+    rem='K=$(cat); umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF "$K" ~/.ssh/authorized_keys || echo "$K" >> ~/.ssh/authorized_keys; id -u'
+    rc,o,er=_run(["sshpass","-e","ssh"]+_ssh_o(port,False)+[tgt,rem],inp=ctx["pub"]+"\n",env=env,t=60)
+    if rc==5 or "Permission denied" in er: return False,"رمز عبور یا نام کاربری اشتباه است (wrong password/user)"
+    if rc!=0: return False,"اتصال SSH برقرار نشد: "+(er or o or "rc=%d"%rc)[-250:]
+    if o.strip().splitlines()[-1:]!=["0"]: return False,"کاربر باید root باشد (برای ساخت کارت شبکه تانل)"
+    return True,"کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)"
+  def f_verify():
+    rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ok"],t=40)
+    return (True,"") if rc==0 and o.endswith("ok") else (False,"ورود با کلید ناموفق: "+(er or o)[-250:])
+  def f_remote():
+    rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"bash -s"],inp=REMOTE_SCRIPT,t=400)
+    if rc!=0 or "SSHPLUS_REMOTE_OK" not in o: return False,(o.splitlines()[-1:] or [er or "failed"])[0][-250:]
+    return True,"PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد"
+  def f_local():
+    tconf_write({"TUN_HOST":host,"TUN_PORT":port,"TUN_USER":user,"TUN_DEV":TUN_DEV,"TUN_ID":TUN_ID,
+                 "TUN_LOCAL":TUN_LOCAL,"TUN_REMOTE":TUN_REMOTE,"SINCE":int(time.time())})
+    cmd([TNET,"sync"]); cmd(["systemctl","daemon-reload"])
+    cmd(["systemctl","enable","sshplus-tunnel"]); cmd(["systemctl","restart","sshplus-tunnel"],30)
+    return True,""
+  def f_wait():
+    for _ in range(40):
+      if cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0 and \
+         cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0:
+        return True,f"{TUN_LOCAL} <-> {TUN_REMOTE}"
+      time.sleep(1)
+    _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","4","--no-pager","-o","cat"],10)
+    return False,"تانل بالا نیامد: "+j[-250:]
+  def f_exit():
+    ip=tun_exit_ip()
+    if not ip: return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)"
+    c=tconf(); c["EXIT_IP"]=ip; tconf_write(c)
+    return True,"IP خروجی تانل: "+ip
+  try:
+    steps=[("بررسی ابزارهای لازم",f_tools),("ساخت کلید SSH مخصوص تانل",f_key),
+           (f"اتصال به {host}:{port} با رمز و نصب کلید",f_login),("تست ورود با کلید",f_verify),
+           ("آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)",f_remote)]
+    ok=True
+    for m,f in steps:
+      if not S(m,f): ok=False; break
+    if ok:
+      for m,f in [("راه‌اندازی تانل روی این سرور",f_local),("انتظار برای برقراری تانل",f_wait)]:
+        if not S(m,f): ok=False; tunnel_rollback(); break
+    if ok: S("تست خروجی اینترنت از مسیر تانل",f_exit)
+  except Exception as e:
+    ok=False; ts_begin("خطای داخلی"); ts_end(False,_scrub(e,pw))
+  with TSL: TS["ok"]=bool(ok); TS["run"]=False
+  return bool(ok)
+
+def tunnel_params(d):
+  host=str(d.get("host","")).strip(); port=to_port(d.get("port") or 22); user=str(d.get("user") or "root").strip()
+  pw=str(d.get("pw","")).replace("\r","").replace("\n","")
+  if not HOST_RE.match(host): return None,(400,{"ok":0,"msg":"Invalid server address"})
+  if not port: return None,(400,{"ok":0,"msg":"Invalid SSH port"})
+  if not TUSER_RE.match(user): return None,(400,{"ok":0,"msg":"Invalid SSH user"})
+  if not pw: return None,(400,{"ok":0,"msg":"Password required"})
+  return (host,port,user,pw),None
+
+def tunnel_setup_start(d):
+  p,err=tunnel_params(d)
+  if err: return err
+  with TSL:
+    if TS["run"]: return 409,{"ok":0,"msg":"Setup is already running"}
+    TS["run"]=True; TS["steps"]=[]; TS["ok"]=None
+  threading.Thread(target=tunnel_setup_run,args=p,daemon=True).start()
+  return 200,{"ok":1}
+
+def tunnel_restart():
+  if not tconf().get("TUN_HOST"): return 400,{"ok":0,"msg":"Tunnel is not set up"}
+  cmd(["systemctl","restart","sshplus-tunnel"],30)
+  return 200,{"ok":1}
+
+def tunnel_test():
+  if not tconf().get("TUN_HOST"): return 400,{"ok":0,"msg":"Tunnel is not set up"}
+  if cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]!=0: return 200,{"ok":0,"msg":"Tunnel link is down"}
+  ip=tun_exit_ip()
+  if not ip: return 200,{"ok":0,"msg":"Link is up but there is no internet through the tunnel"}
+  c=tconf(); c["EXIT_IP"]=ip; tconf_write(c)
+  return 200,{"ok":1,"ip":ip}
+
+def tunnel_remove():
+  if TS["run"]: return 409,{"ok":0,"msg":"Setup is running"}
+  _,io=on_map(True); n=0
+  for u,(_,sh) in passwd_map().items():
+    if sh==SHELL_T:                     # keep these accounts alive as direct accounts
+      cmd(["usermod","-s",SHELL,u]); n+=1
+      for pid in io.get(u,[]): kill_pid(pid)
+  tunnel_rollback()
+  if os.path.exists(TNET): cmd([TNET,"sync"])
+  with TSL: TS["steps"]=[]; TS["ok"]=None
+  return 200,{"ok":1,"converted":n}
+
 # ---------- monitor ----------
 def mon():
   n=0
   while True:
     try:
       if n%5==0:
-        for srv in ("sshplus-dropbear","badvpn"):
+        svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn"]
+        if tconf().get("TUN_HOST"): svs.append("sshplus-tunnel")
+        for srv in svs:
           if cmd(["systemctl","is-active",srv])[0]!=0:
             cmd(["systemctl","reset-failed",srv]); cmd(["systemctl","restart",srv])
       n+=1
+      if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
       sessions,io_pids=on_map(True)
       um=user_uid_map(); sh=shadow_map(); lim=read_limits_db(); today=int(time.time()//86400)
       with ML:
@@ -651,9 +1134,10 @@ class H(BaseHTTPRequestHandler):
       if not s.auth(): s.js({"err":1},401); return
       if p=="/api/overview":
         st=stats(); bv=read_bv()
-        pc=rjson(PORTS,{"ssh":22,"ssh2":2222,"db":[]}); pc["ssh_all"]=sorted(sshd_ports())
+        pc=rjson(PORTS,{"ssh":22,"ssh2":2222,"db":[]}); pc["ssh_all"]=sorted(sshd_ports()); pc.setdefault("tdb",[])
         adm=str(rjson(CFG,{"username":"admin"}).get("username","admin")).strip()
-        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"users":get_users(st["om"])}); return
+        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"tun":tunnel_status(False),"users":get_users(st["om"])}); return
+      if p=="/api/tunnel": s.js(tunnel_status(True)); return
       s.js({"err":404},404)
     except Exception as e:
       try: s.js({"err":str(e)[:100]},500)
@@ -683,6 +1167,10 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/bbr":
         ok,msg=bbr_set(bool(d.get("on")))
         s.js({"ok":1 if ok else 0,"msg":msg,"bbr":bbr_state()},200 if ok else 400)
+      elif p=="/api/tunnel/setup": c,r=tunnel_setup_start(d); s.js(r,c)
+      elif p=="/api/tunnel/restart": c,r=tunnel_restart(); s.js(r,c)
+      elif p=="/api/tunnel/test": c,r=tunnel_test(); s.js(r,c)
+      elif p=="/api/tunnel/remove": c,r=tunnel_remove(); s.js(r,c)
       elif p=="/api/admin":
         c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"})
         au=str(d.get("u","")).strip() or str(c.get("username","admin")).strip()
@@ -697,7 +1185,18 @@ class H(BaseHTTPRequestHandler):
       try: s.js({"ok":0,"msg":str(e)[:100]},400)
       except Exception: pass
 
+def cli_tunnel_setup(host,port,user):
+  p,err=tunnel_params({"host":host,"port":port,"user":user,"pw":"x"})
+  if err: print(err[1]["msg"]); return 1
+  pw=getpass.getpass(f"Password of {user}@{host}: ")
+  if not pw: print("Password required"); return 1
+  CLI[0]=True; print(f"Setting up the tunnel to {host}:{p[1]} ...")
+  ok=tunnel_setup_run(host,p[1],user,pw)
+  print("Tunnel is UP" if ok else "FAILED (nothing was changed for your users)")
+  return 0 if ok else 1
+
 if __name__=="__main__":
+  if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4]))
   open(DB,"a").close()
   threading.Thread(target=mon,daemon=True).start()
   c=rjson(CFG,{})
@@ -716,7 +1215,7 @@ cat > /opt/sshplus-panel/index.html <<'HTMLEOF'
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SSH Plus + Dropbear + BadVPN</title>
+<title>SSH Plus + Dropbear + BadVPN + Tunnel</title>
 <style>
 :root{--bg:#0b1120;--card:#111827;--bd:#1f2937;--tx:#f3f4f6;--mu:#9ca3af;--pr:#06b6d4;--ok:#10b981;--er:#ef4444;--wn:#f59e0b}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,Tahoma,sans-serif}
@@ -750,6 +1249,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <h3 id="eTit" style="color:var(--pr);margin-bottom:.8rem">ویرایش کاربر</h3>
   <input type="hidden" id="eu">
   <label>رمز جدید (خالی = بدون تغییر)</label><input id="epw" autocapitalize="none">
+  <label>نوع اکانت (با تغییر، اتصال‌های فعال قطع می‌شوند)</label><select id="etm" onchange="fillPorts()"><option value="direct">Direct (مستقیم)</option><option value="tunnel">Tunnel (تانل)</option></select>
   <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
   <div style="display:flex;gap:.5rem">
     <div style="flex:1"><label>حجم (GB | 0=نامحدود)</label><input id="eq" type="number" step="0.5" min="0"></div>
@@ -771,6 +1271,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 
 <div class="tab-bar">
   <button id="bTabU" class="tab-btn act" onclick="swTab('u')">👥 کاربران</button>
+  <button id="bTabT" class="tab-btn" onclick="swTab('t')">🌐 تانل</button>
   <button id="bTabS" class="tab-btn" onclick="swTab('s')">⚙️ تنظیمات سرور</button>
 </div>
 
@@ -780,6 +1281,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div class="card"><label>آنلاین / کل کاربران</label><h2 id="stU">0 / 0</h2></div>
     <div class="card"><label>Dropbear</label><div id="stDb" style="margin-top:.3rem">--</div></div>
     <div class="card"><label>BadVPN</label><div id="stBv" style="margin-top:.3rem">--</div></div>
+    <div class="card"><label>تانل / Dropbear تانل</label><div id="stTn" style="margin-top:.3rem">--</div></div>
     <div class="card"><label>BBR / منابع</label><div id="stBbr" style="margin-top:.2rem">--</div><div id="stRes" style="font-size:.78rem;color:var(--mu);margin-top:.2rem">--</div></div>
   </div>
 
@@ -788,6 +1290,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div class="row">
       <div><label>نام کاربری (انگلیسی)</label><input id="nu" placeholder="user1" autocapitalize="none"></div>
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
+      <div><label>نوع اکانت</label><select id="ntm" onchange="fillPorts()"><option value="direct">Direct (مستقیم)</option><option value="tunnel">Tunnel (تانل)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -799,9 +1302,48 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card" style="overflow-x:auto">
     <h3>📋 لیست کاربران</h3>
     <table>
-      <thead><tr><th>User / Pass</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>User / Pass</th><th>Type</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody id="tb"></tbody>
     </table>
+  </div>
+</div>
+
+<div id="secT" class="hid">
+  <div class="g2">
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🌐 وضعیت تانل</h3>
+      <div id="tnStat" style="margin-bottom:.7rem">--</div>
+      <div id="tnInfo" style="font-size:.85rem;line-height:1.9"></div>
+      <div id="tnBtns" class="hid" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.8rem">
+        <button class="btn btn-s btn-o" onclick="tunTest()">🔍 تست خروجی</button>
+        <button class="btn btn-s btn-w" onclick="tunRestart()">🔄 ری‌استارت تانل</button>
+        <button class="btn btn-s btn-e" onclick="tunRemove()">🗑️ حذف تانل</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 نصب و اتصال تانل (یک کلیک)</h3>
+      <label>IP یا دامنه‌ی سرور جدید (خروجی)</label><input id="tnH" placeholder="1.2.3.4" autocapitalize="none" autocorrect="off">
+      <div style="display:flex;gap:.5rem">
+        <div style="flex:1"><label>پورت SSH</label><input id="tnP" type="number" value="22"></div>
+        <div style="flex:1"><label>کاربر (باید root باشد)</label><input id="tnU" value="root" autocapitalize="none"></div>
+      </div>
+      <label>رمز SSH سرور جدید</label><input id="tnW" type="password" autocomplete="off" autocapitalize="none">
+      <button id="tnGo" class="btn" style="width:100%" onclick="tunSetup()">⚡ نصب و برقراری تانل</button>
+      <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.7">رمز فقط برای نصب کلید SSH استفاده می‌شود و ذخیره نمی‌شود. بعد از آن ارتباط با کلید است.<br>
+      ⚠️ پنل روی HTTP ساده است؛ اگر نمی‌خواهی رمز سرور روی HTTP برود، در ترمینال این سرور بزن:<br><code dir="ltr">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code></div>
+    </div>
+  </div>
+  <div class="card" id="tnLogBox">
+    <h3 style="margin-bottom:.6rem">📜 مراحل نصب</h3>
+    <div id="tnLog" style="font-size:.85rem;line-height:1.9;color:var(--mu)">هنوز نصبی انجام نشده.</div>
+  </div>
+  <div class="card" style="font-size:.82rem;line-height:1.9;color:var(--mu)">
+    <h3 style="margin-bottom:.5rem;color:var(--tx)">ℹ️ نحوه‌ی کار</h3>
+    ۱) کاربر به <b>همین سرور</b> وصل می‌شود. اگر اکانتش «تانل» باشد، ترافیک اینترنتش از داخل تانل می‌گذرد و با <b>IP سرور جدید</b> بیرون می‌رود؛ اگر «مستقیم» باشد با IP همین سرور.<br>
+    ۲) اکانت تانل روی <b>پورت‌های SSH (OpenSSH)</b> و <b>پورت‌های Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای اکانت مستقیم‌اند. پورت‌های تانل از تب تنظیمات قابل تغییرند.<br>
+    ۳) اگر تانل قطع شود، اکانت‌های تانل <b>اینترنت ندارند</b> (به‌جای نشت از IP مستقیم). برقراری مجدد خودکار است.<br>
+    ۴) UDPGW (بازی/تماس) فعلاً از همین سرور خارج می‌شود، نه از تانل.<br>
+    ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.
   </div>
 </div>
 
@@ -840,6 +1382,13 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>Dropbear 5</label><input id="d5" type="number"></div>
       <div><label>Dropbear 6</label><input id="d6" type="number"></div>
     </div>
+    <label style="display:block;margin:.4rem 0 .2rem">🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)</label>
+    <div class="row">
+      <div><label>Tunnel DB 1</label><input id="td1" type="number"></div>
+      <div><label>Tunnel DB 2</label><input id="td2" type="number"></div>
+      <div><label>Tunnel DB 3</label><input id="td3" type="number"></div>
+      <div><label>Tunnel DB 4</label><input id="td4" type="number"></div>
+    </div>
     <button class="btn btn-s" onclick="savePorts()">ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)</button>
     <h3 style="margin:1.2rem 0 .6rem">🎮 BadVPN UDPGW</h3>
     <div class="row">
@@ -858,8 +1407,17 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="";
 function swTab(t){
-  $("secU").classList.toggle("hid",t!=="u"); $("secS").classList.toggle("hid",t!=="s");
-  $("bTabU").classList.toggle("act",t==="u"); $("bTabS").classList.toggle("act",t==="s");
+  $("secU").classList.toggle("hid",t!=="u"); $("secS").classList.toggle("hid",t!=="s"); $("secT").classList.toggle("hid",t!=="t");
+  $("bTabU").classList.toggle("act",t==="u"); $("bTabS").classList.toggle("act",t==="s"); $("bTabT").classList.toggle("act",t==="t");
+  if(t==="t") loadTun();
+}
+function fillPorts(cn,ce){
+  const sp=(pCfg.ssh_all&&pCfg.ssh_all.length)?pCfg.ssh_all:[22];
+  const mk=tm=>portOpts(sp,tm==="tunnel"?(pCfg.tdb||[]):(pCfg.db||[]));
+  const n=cn!==undefined?cn:$("npt").value, e=ce!==undefined?ce:$("ept").value;
+  $("npt").innerHTML=mk($("ntm").value); $("ept").innerHTML=mk($("etm").value);
+  if([...$("npt").options].some(o=>o.value===n)) $("npt").value=n;
+  if([...$("ept").options].some(o=>o.value===e)) $("ept").value=e;
 }
 async function api(u,m="GET",b=null){
   const o={method:m,headers:{"Authorization":"Bearer "+tok}};
@@ -887,30 +1445,34 @@ async function load(force){
   const sp=(pCfg.ssh_all&&pCfg.ssh_all.length)?pCfg.ssh_all:[22];
   const db=pCfg.db||[];
   $("stU").innerText=d.st.on_tot+" / "+ul.length;
+  const tn=d.tun||{};
+  $("stTn").innerHTML=(tn.conf?(tn.up?`<span class="bdg ok">TUNNEL UP</span> <span style="font-size:.75rem;color:var(--mu)">${esc(tn.exit||"")}</span>`:`<span class="bdg er">TUNNEL DOWN</span>`):`<span class="bdg wn">OFF</span>`)
+    +" "+(d.st.dbt?`<span class="bdg ok">DB-T (${(pCfg.tdb||[]).join(",")})</span>`:`<span class="bdg er">DB-T STOPPED</span>`);
   $("stDb").innerHTML=d.st.db?`<span class="bdg ok">ACTIVE (${db.join(",")})</span>`:`<span class="bdg er">STOPPED</span>`;
   $("stBv").innerHTML=d.st.bv?`<span class="bdg ok">UDPGW ${esc(bv.BIND_ADDR||"")}:${esc(bv.UDP_PORT||7300)}</span>`:`<span class="bdg er">STOPPED</span>`;
   $("stBbr").innerHTML=bbrOn?`<span class="bdg ok">BBR ON</span>`:`<span class="bdg wn">${esc(bb.cc||"?")}</span>`;
   $("stRes").innerText=`CPU:${d.st.cpu}% | RAM:${d.st.mem}% | ↓${d.st.rx}M ↑${d.st.tx}M`;
-  $("pBan").innerText=`OpenSSH: ${sp.join(", ")} | Dropbear: ${db.join(", ")} | UDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
+  $("pBan").innerText=`OpenSSH: ${sp.join(", ")} | Dropbear: ${db.join(", ")} | Tunnel-Dropbear: ${(pCfg.tdb||[]).join(", ")} | UDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
   $("bbrCc").value=bb.cc||""; $("bbrQd").value=bb.qdisc||"";
   $("bbrSt").innerHTML=bbrOn?`<span class="bdg ok">فعال</span>`:(bb.avail?`<span class="bdg wn">غیرفعال</span>`:`<span class="bdg er">کرنل پشتیبانی نمی‌کند</span>`);
   $("bbrBtn").innerText=bbrOn?"⛔ خاموش کردن BBR":"🚀 روشن کردن BBR";
   $("bbrBtn").className="btn "+(bbrOn?"btn-e":"btn-o");
-  const sig=sp.join(",")+"|"+db.join(",")+"|"+JSON.stringify(bv)+"|"+pCfg.ssh+"|"+pCfg.ssh2;
+  const sig=sp.join(",")+"|"+db.join(",")+"|"+JSON.stringify(bv)+"|"+pCfg.ssh+"|"+pCfg.ssh2+"|"+(pCfg.tdb||[]).join(",");
   if(force||sig!==lastSig){
     lastSig=sig;
     const cn=$("npt").value, ce=$("ept").value;
     $("s1").value=pCfg.ssh||22; $("s2").value=pCfg.ssh2||0;
     for(let i=1;i<=6;i++) $("d"+i).value=db[i-1]||"";
+    for(let i=1;i<=4;i++) $("td"+i).value=(pCfg.tdb||[])[i-1]||"";
     $("bp").value=bv.UDP_PORT||7300; $("bm").value=bv.UDP_MTU||1200; $("bc").value=bv.MAX_CLIENTS||1000;
     $("bn").value=bv.MAX_CONN||64; $("bb").value=bv.BIND_ADDR||"127.0.0.1";
     $("sshAll").innerText="پورت‌های فعال sshd: "+sp.join(", ")+" (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)";
     if(!$("au").value && document.activeElement!==$("au")) $("au").value=d.adm||"admin";
-    const o=portOpts(sp,db); $("npt").innerHTML=o; $("ept").innerHTML=o;
-    if(cn) $("npt").value=cn; if(ce) $("ept").value=ce;
+    fillPorts(cn,ce);
   }
   $("tb").innerHTML=ul.map(x=>`<tr>
     <td><b>${esc(x.u)}</b><div style="font-size:.75rem;color:var(--mu)">🔑 ${esc(x.pw||"***")}</div></td>
+    <td><span class="bdg ${x.tm==='tunnel'?'wn':'ok'}">${x.tm==='tunnel'?'🌐 Tunnel':'Direct'}</span></td>
     <td><span class="bdg ok">${esc(x.pt)}</span></td>
     <td><b>${x.on}</b> / ${x.lim}</td>
     <td><b>${esc(x.ugb)}</b> / ${x.q>0?x.q+" GB":"∞"}</td>
@@ -925,18 +1487,18 @@ async function load(force){
 function editU(u){
   const x=ul.find(i=>i.u===u); if(!x) return;
   $("eTit").innerText="ویرایش: "+x.u; $("eu").value=x.u; $("epw").value=x.pw||"";
-  if([...$("ept").options].some(o=>o.value===x.pt)) $("ept").value=x.pt; else $("ept").value="All";
+  $("etm").value=x.tm||"direct"; fillPorts(undefined,x.pt);
   $("eq").value=x.q||0; $("el").value=x.lim||1; $("ed").value=""; $("erst").checked=false; $("eBox").classList.remove("hid");
 }
 async function saveUser(edit){
-  const b=edit?{edit:1,u:$("eu").value,pw:$("epw").value,pt:$("ept").value,q:$("eq").value,l:$("el").value,d:$("ed").value,rst:$("erst").checked}
-              :{edit:0,u:$("nu").value,pw:$("npw").value,pt:$("npt").value,q:$("nq").value,l:$("nl").value,d:$("nd").value};
+  const b=edit?{edit:1,u:$("eu").value,pw:$("epw").value,pt:$("ept").value,tm:$("etm").value,q:$("eq").value,l:$("el").value,d:$("ed").value,rst:$("erst").checked}
+              :{edit:0,u:$("nu").value,pw:$("npw").value,pt:$("npt").value,tm:$("ntm").value,q:$("nq").value,l:$("nl").value,d:$("nd").value};
   const r=await api("/api/user/save","POST",b);
   if(r.ok){$("eBox").classList.add("hid");$("nu").value="";$("npw").value="";load(0)}else alert(r.msg||"Error");
 }
 async function delU(u){if(confirm("Delete "+u+"?")){await api("/api/user/del","POST",{u});load(0)}}
 async function savePorts(){
-  const r=await api("/api/ports","POST",{ssh:$("s1").value,ssh2:$("s2").value,db:[1,2,3,4,5,6].map(i=>$("d"+i).value)});
+  const r=await api("/api/ports","POST",{ssh:$("s1").value,ssh2:$("s2").value,db:[1,2,3,4,5,6].map(i=>$("d"+i).value),tdb:[1,2,3,4].map(i=>$("td"+i).value)});
   if(!r.ok){alert(r.msg||"Error");return}
   alert("پورت‌ها ذخیره شد"+(r.dropped&&r.dropped.length?"\nنادیده گرفته شد (تکراری/رزرو): "+r.dropped.join(", "):""));
   load(1);
@@ -958,11 +1520,40 @@ async function saveAdm(){
 }
 function copyU(u){
   const x=ul.find(i=>i.u===u); if(!x) return;
-  const t=`Host/IP: ${location.hostname}\nSSH Ports: ${(pCfg.ssh_all||[22]).join(", ")}\nDropbear Ports: ${(pCfg.db||[]).join(", ")}\nUser: ${x.u}\nPass: ${x.pw}\nLimit: ${x.lim}\nQuota: ${x.q>0?x.q+" GB":"Unlimited"}\nUDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
+  const tun=x.tm==="tunnel";
+  const t=`Host/IP: ${location.hostname}\nType: ${tun?"Tunnel":"Direct"}\nSSH Ports: ${(pCfg.ssh_all||[22]).join(", ")}\nDropbear Ports: ${(tun?(pCfg.tdb||[]):(pCfg.db||[])).join(", ")}\nUser: ${x.u}\nPass: ${x.pw}\nLimit: ${x.lim}\nQuota: ${x.q>0?x.q+" GB":"Unlimited"}\nUDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
   if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>alert("Copied!")); else prompt("Copy:",t);
+}
+async function loadTun(){
+  let d; try{d=await api("/api/tunnel")}catch(e){return}
+  const sp=d.setup||{steps:[]}; const run=!!sp.run;
+  $("tnStat").innerHTML=!d.conf?'<span class="bdg wn">تانل نصب نشده</span>':(d.up?'<span class="bdg ok">🟢 متصل</span>':'<span class="bdg er">🔴 قطع / در حال اتصال</span>');
+  $("tnInfo").innerHTML=d.conf?`سرور خروجی: <b dir="ltr">${esc(d.user)}@${esc(d.host)}:${esc(d.port)}</b><br>IP خروجی: <b dir="ltr">${esc(d.exit||"—")}</b><br>پورت‌های Dropbear تانل: <b dir="ltr">${esc((d.tdb||[]).join(", ")||"—")}</b><br>اکانت‌های تانل: <b>${(d.users||[]).length}</b>`:"هنوز تانلی تنظیم نشده. فرم کناری را پر کن.";
+  $("tnBtns").classList.toggle("hid",!d.conf);
+  $("tnGo").disabled=run; $("tnGo").innerText=run?"⏳ در حال نصب...":(d.conf?"♻️ نصب مجدد / تغییر سرور":"⚡ نصب و برقراری تانل");
+  if(sp.steps.length){
+    const ic={run:"⏳",ok:"✅",err:"❌",warn:"⚠️"}, cl={err:"var(--er)",warn:"var(--wn)"};
+    $("tnLog").innerHTML=sp.steps.map(x=>`<div>${ic[x.s]||""} ${esc(x.m)}${x.d?`<div style="font-size:.78rem;padding-inline-start:1.5rem;color:${cl[x.s]||"var(--mu)"}">${esc(x.d)}</div>`:""}</div>`).join("")
+      +(!run&&sp.ok===true?'<div style="color:var(--ok);margin-top:.5rem"><b>✔ تانل برقرار شد. در «ساخت کاربر» نوع اکانت را «تانل» انتخاب کن.</b></div>':"")
+      +(!run&&sp.ok===false?'<div style="color:var(--er);margin-top:.5rem"><b>✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.</b></div>':"");
+  }
+}
+async function tunSetup(){
+  if(!$("tnH").value.trim()||!$("tnW").value){alert("IP و رمز سرور جدید را وارد کن");return}
+  const r=await api("/api/tunnel/setup","POST",{host:$("tnH").value.trim(),port:$("tnP").value,user:$("tnU").value.trim(),pw:$("tnW").value});
+  if(!r.ok){alert(r.msg||"Error");return}
+  $("tnW").value=""; loadTun();
+}
+async function tunTest(){const r=await api("/api/tunnel/test","POST",{}); alert(r.ok?("تانل سالم است. IP خروجی: "+r.ip):(r.msg||"Error")); loadTun()}
+async function tunRestart(){const r=await api("/api/tunnel/restart","POST",{}); alert(r.ok?"ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین":(r.msg||"Error")); loadTun()}
+async function tunRemove(){
+  if(!confirm("تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند."))return;
+  const r=await api("/api/tunnel/remove","POST",{});
+  alert(r.ok?("تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: "+(r.converted||0)):(r.msg||"Error")); load(1); loadTun();
 }
 if(tok){$("lBox").classList.add("hid");load(1)}
 setInterval(()=>{if(tok&&$("lBox").classList.contains("hid"))load(0)},4000);
+setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secT").classList.contains("hid"))loadTun()},2000);
 </script>
 </body>
 </html>
@@ -971,32 +1562,43 @@ HTMLEOF
 # firewall: only if ufw is active
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
   for p in $(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 \
-           $(python3 -c 'import json;print(" ".join(map(str,json.load(open("/etc/SSHPlus/ports.json"))["db"])))'); do
+           $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))'); do
     ufw allow "${p}/tcp" >/dev/null 2>&1
   done
 fi
 
-systemctl reset-failed sshplus-panel sshplus-dropbear badvpn 2>/dev/null || true
-systemctl enable --now sshplus-panel sshplus-dropbear badvpn >/dev/null 2>&1
-systemctl restart sshplus-dropbear badvpn sshplus-panel
+systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net sshplus-tunnel badvpn 2>/dev/null || true
+systemctl enable sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net badvpn >/dev/null 2>&1
+systemctl restart sshplus-tunnel-net
+systemctl restart sshplus-dropbear sshplus-dropbear-t badvpn sshplus-panel
+# a tunnel configured by a previous run keeps working after an update
+if [ -f /etc/SSHPlus/tunnel.conf ]; then
+  systemctl enable sshplus-tunnel >/dev/null 2>&1
+  systemctl restart sshplus-tunnel
+fi
 sleep 2
 
 IP=$(curl -sfL --max-time 4 https://api.ipify.org || hostname -I | awk '{print $1}')
 echo "=========================================="
 echo "Panel:     $(systemctl is-active sshplus-panel)"
-echo "Dropbear:  $(systemctl is-active sshplus-dropbear)"
+echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t))"
+if [ -f /etc/SSHPlus/tunnel.conf ]; then echo "Tunnel:    $(systemctl is-active sshplus-tunnel)"; else echo "Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)"; fi
 echo "BadVPN:    $(systemctl is-active badvpn)"
 echo "SSH:       $(systemctl is-active ssh)"
 echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
 echo "--- listening:"
 ss -tlnp | grep -E 'dropbear|badvpn|python3|sshd' | awk '{print $4, $6}'
+echo "Version:   $VERSION"
 echo "Panel URL: http://${IP}:2053  (admin / admin)"
 echo "=========================================="
 }
 
 # ------------------------------------------------------------------------------
 mkdir -p /var/log/sshplus
-step1
-step2
-step3
-step4
+# SSHPLUS_LIB=1 only loads the functions (used for testing)
+if [ -z "$SSHPLUS_LIB" ]; then
+  step1
+  step2
+  step3
+  step4
+fi
