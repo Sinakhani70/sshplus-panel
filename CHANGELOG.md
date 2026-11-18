@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1
+- Base install: `apt-get update` first, then `curl`, then all other packages.
+- Tunnel setup: `apt-get update` now always runs first on both servers (this one and the exit server) before any package is installed.
+
 ## v1.1.0 — Tunnel
 
 ### New
