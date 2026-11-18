@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.6.0 — English language
+- **The "FA / EN" button used to only flip the page direction** (everything stayed Persian and the layout broke). It is now a real language switch: the whole panel — labels, buttons, tables, notes, dialogs (`alert`/`confirm`/`prompt`), the tunnel installation steps sent by the server, charts — is translated, the page switches to LTR and back to RTL, and the choice is remembered in the browser (also on the login screen).
+- **Subscription page** (`/s/<token>`) is bilingual: `?lang=en` / `?lang=fa`, a language link on the page, and it follows the panel's choice.
+- Texts that were outdated were corrected in Persian too: the tunnel form no longer says the panel is "plain HTTP" (it is HTTPS since 1.5) and the "tunnel is up" message refers to In/Out instead of the old account type.
+- Small layout fix: long badges (port lists) wrap inside their card.
+- Notes: Telegram messages and server error messages stay in English; the panel default language is still Persian.
+- How it was checked: the whole panel was walked in English (all tabs, modals, bulk/template flows, the one-click tunnel setup, the settings actions that raise dialogs) with an automatic scan for any Persian text left — none besides the bilingual language-button label — then switched back to Persian and checked again.
+
 ## v1.5.1 — Documentation
 - README rewritten for v1.5 with proper Markdown structure (English + Persian): features, install/update, the HTTPS first login, the tunnel with In/Out and port coordination, backup, Telegram, subscription page, statistics, files, security notes and uninstall (including the exit server).
 - The installer's final line now prints `https://` and tells you the default password must be changed at the first login.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.5.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.6.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.5.1"
+VERSION="1.6.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -1709,7 +1709,13 @@ def qr_svg(text):
   img=qrcode.make(text,image_factory=qrcode.image.svg.SvgPathImage,box_size=10,border=2)
   b=io.BytesIO(); img.save(b); return b.getvalue().decode()
 
-SUBHTML='''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+SUBT={"fa":{"dir":"rtl","title":"وضعیت اکانت","status":"وضعیت","ok":"فعال","bad":"منقضی/پر","exp":"انقضا","days":"روز","usage":"مصرف","unl":"نامحدود",
+  "conc":"اتصال همزمان","info":"اطلاعات اتصال","host":"آدرس","user":"نام کاربری","pw":"رمز","ssh":"پورت‌های SSH","db":"پورت‌های Dropbear","exit":"IP خروجی",
+  "qr":"لینک و QR","cpl":"کپی لینک ssh","cpa":"کپی همه‌ی اطلاعات","copied":"کپی شد","other":"English"},
+ "en":{"dir":"ltr","title":"Account status","status":"Status","ok":"Active","bad":"Expired/Full","exp":"Expires","days":"days","usage":"Usage","unl":"Unlimited",
+  "conc":"Concurrent connections","info":"Connection info","host":"Host","user":"Username","pw":"Password","ssh":"SSH ports","db":"Dropbear ports","exit":"Exit IP",
+  "qr":"Link & QR","cpl":"Copy ssh link","cpa":"Copy all info","copied":"Copied","other":"فارسی"}}
+SUBHTML='''<!DOCTYPE html><html lang="@@LANG@@" dir="@@DIR@@"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CK.VPN - @@USER@@</title><meta name="robots" content="noindex">
 <style>:root{--bg:#0b1120;--card:#111827;--bd:#1f2937;--tx:#f3f4f6;--mu:#9ca3af;--pr:#06b6d4;--ok:#10b981;--er:#ef4444;--wn:#f59e0b}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,Tahoma,sans-serif}body{background:var(--bg);color:var(--tx);padding:1rem;max-width:560px;margin:auto}
@@ -1719,22 +1725,24 @@ SUBHTML='''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8">
 .btn{background:var(--pr);color:#031116;border:0;padding:.5rem .9rem;border-radius:8px;font-weight:700;cursor:pointer;margin:.15rem}
 .bdg{padding:.15rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700}.ok{background:rgba(16,185,129,.15);color:var(--ok)}.er{background:rgba(239,68,68,.15);color:var(--er)}
 code{direction:ltr;display:inline-block;word-break:break-all;color:var(--pr)}.qr{background:#fff;border-radius:12px;padding:10px;max-width:240px;margin:.6rem auto}.qr svg{width:100%;height:auto;display:block}</style></head><body>
-<div class="card" style="display:flex;align-items:center;gap:.8rem"><div style="font-size:2rem;font-weight:800;color:var(--pr)">CK</div><div><h1>CK.VPN</h1><div style="color:var(--mu);font-size:.8rem">@@USER@@</div></div></div>
-<div class="card"><h3>وضعیت اکانت</h3>
-<div class="row"><span>وضعیت</span><span class="bdg @@STCLS@@">@@STTXT@@</span></div>
-<div class="row"><span>انقضا</span><span dir="ltr">@@EXP@@ (@@DL@@ روز)</span></div>
-<div class="row"><span>مصرف</span><span dir="ltr">@@USED@@ / @@QUOTA@@</span></div><div class="bar"><i style="width:@@PCT@@%"></i></div>
-<div class="row"><span>اتصال همزمان</span><span>@@LIM@@</span></div></div>
-<div class="card"><h3>اطلاعات اتصال</h3>
-<div class="row"><span>آدرس</span><code>@@HOST@@</code></div><div class="row"><span>نام کاربری</span><code>@@USER@@</code></div><div class="row"><span>رمز</span><code>@@PASS@@</code></div>
-<div class="row"><span>پورت‌های SSH</span><code>@@SSH@@</code></div><div class="row"><span>پورت‌های Dropbear</span><code>@@DB@@</code></div>
+<div class="card" style="display:flex;align-items:center;gap:.8rem"><div style="font-size:2rem;font-weight:800;color:var(--pr)">CK</div><div><h1>CK.VPN</h1><div style="color:var(--mu);font-size:.8rem">@@USER@@</div></div><a href="?lang=@@OTHERLANG@@" onclick="try{localStorage.setItem('lang','@@OTHERLANG@@')}catch(e){}" style="margin-inline-start:auto;color:var(--pr);font-size:.8rem;text-decoration:none">@@T_other@@</a></div>
+<div class="card"><h3>@@T_title@@</h3>
+<div class="row"><span>@@T_status@@</span><span class="bdg @@STCLS@@">@@STTXT@@</span></div>
+<div class="row"><span>@@T_exp@@</span><span dir="ltr">@@EXP@@ (@@DL@@ @@T_days@@)</span></div>
+<div class="row"><span>@@T_usage@@</span><span dir="ltr">@@USED@@ / @@QUOTA@@</span></div><div class="bar"><i style="width:@@PCT@@%"></i></div>
+<div class="row"><span>@@T_conc@@</span><span>@@LIM@@</span></div></div>
+<div class="card"><h3>@@T_info@@</h3>
+<div class="row"><span>@@T_host@@</span><code>@@HOST@@</code></div><div class="row"><span>@@T_user@@</span><code>@@USER@@</code></div><div class="row"><span>@@T_pw@@</span><code>@@PASS@@</code></div>
+<div class="row"><span>@@T_ssh@@</span><code>@@SSH@@</code></div><div class="row"><span>@@T_db@@</span><code>@@DB@@</code></div>
 <div class="row"><span>UDPGW</span><code>127.0.0.1:7300</code></div>
-<div class="row"><span>IP خروجی</span><code>@@EXIT@@</code></div></div>
-<div class="card" style="text-align:center"><h3>لینک و QR</h3><div class="qr">@@QR@@</div><div style="margin:.5rem 0"><code>@@URI@@</code></div>
-<button class="btn" onclick="cp(@@URIJS@@)">کپی لینک ssh</button><button class="btn" onclick="cp(@@ALLJS@@)">کپی همه‌ی اطلاعات</button></div>
-<script>function cp(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){alert("کپی شد")},function(){prompt("Copy:",t)});else prompt("Copy:",t)}</script></body></html>'''
+<div class="row"><span>@@T_exit@@</span><code>@@EXIT@@</code></div></div>
+<div class="card" style="text-align:center"><h3>@@T_qr@@</h3><div class="qr">@@QR@@</div><div style="margin:.5rem 0"><code>@@URI@@</code></div>
+<button class="btn" onclick="cp(@@URIJS@@)">@@T_cpl@@</button><button class="btn" onclick="cp(@@ALLJS@@)">@@T_cpa@@</button></div>
+<script>function cp(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){alert("@@T_copied@@")},function(){prompt("Copy:",t)});else prompt("Copy:",t)}
+try{if(!/[?&]lang=/.test(location.search)&&localStorage.getItem("lang")==="en")location.replace(location.pathname+"?lang=en")}catch(e){}</script></body></html>'''
 
-def sub_page(u,hosthdr):
+def sub_page(u,hosthdr,lang="fa"):
+  lang="en" if lang=="en" else "fa"; T=SUBT[lang]
   x=sub_data(u,hosthdr)
   if not x: return None
   esc_=lambda v: (str(v).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;"))
@@ -1743,12 +1751,13 @@ def sub_page(u,hosthdr):
   except Exception: pct=0
   bad=x["expd"] or x["qfull"]
   allt="Host: %s\nUser: %s\nPass: %s\nSSH ports: %s\nDropbear ports: %s\nUDPGW: 127.0.0.1:7300"%(x["host"],x["u"],x["pw"],", ".join(map(str,x["ssh"])) or "-",", ".join(map(str,x["db"])) or "-")
-  rep={"USER":esc_(x["u"]),"STCLS":"er" if bad else "ok","STTXT":"منقضی/پر" if bad else "فعال","EXP":esc_(x["exp"]),"DL":x["dl"],"USED":esc_(used_txt),
-       "QUOTA":("%g GB"%q) if q>0 else "نامحدود","PCT":pct,"LIM":x["lim"],"HOST":esc_(x["host"]),"PASS":esc_(x["pw"]),
+  rep={"USER":esc_(x["u"]),"STCLS":"er" if bad else "ok","STTXT":T["bad"] if bad else T["ok"],"EXP":esc_(x["exp"]),"DL":x["dl"],"USED":esc_(used_txt),
+       "QUOTA":("%g GB"%q) if q>0 else T["unl"],"PCT":pct,"LIM":x["lim"],"HOST":esc_(x["host"]),"PASS":esc_(x["pw"]),
        "SSH":esc_(", ".join(map(str,x["ssh"])) or "-"),"DB":esc_(", ".join(map(str,x["db"])) or "-"),"EXIT":esc_(x["exit"]),
        "QR":qr_svg(uri) or "<div style='color:#555;font-size:.8rem'>QR unavailable (python3-qrcode)</div>","URI":esc_(uri),
        "URIJS":json.dumps(uri).replace("<","\\u003c"),"ALLJS":json.dumps(allt).replace("<","\\u003c")}
-  h=SUBHTML
+  h=SUBHTML.replace("@@LANG@@",lang).replace("@@DIR@@",T["dir"]).replace("@@OTHERLANG@@","fa" if lang=="en" else "en")
+  for k,v in T.items(): h=h.replace("@@T_%s@@"%k,v)
   for k,v in rep.items(): h=h.replace("@@%s@@"%k,str(v))
   return h
 
@@ -1829,7 +1838,7 @@ class H(BaseHTTPRequestHandler):
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
         if len(FAIL[k])>=20: s.js({"err":2},429); return
-        u=sub_find(p[3:]); h=sub_page(u,s.headers.get("Host","")) if u else None
+        u=sub_find(p[3:]); h=sub_page(u,s.headers.get("Host",""),parse_qs(urlparse(s.path).query).get("lang",["fa"])[0]) if u else None
         if not h: FAIL[k].append(now); s.raw(b"not found","text/plain",404); return
         s.raw(h.encode(),"text/html; charset=utf-8",200,{"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Robots-Tag":"noindex"}); return
       if not s.auth(): s.js({"err":1},401); return
@@ -1972,7 +1981,7 @@ label{font-size:.8rem;color:var(--mu)}
 .tab-bar{display:flex;gap:.6rem;margin-bottom:1rem;border-bottom:1px solid var(--bd);padding-bottom:.75rem}
 .tab-btn{background:var(--card);color:var(--mu);border:1px solid var(--bd);padding:.6rem 1.2rem;border-radius:10px;font-weight:700;cursor:pointer;flex:1;text-align:center}
 .tab-btn.act{background:rgba(6,182,212,.15);color:var(--pr);border-color:var(--pr)}
-.bdg{padding:.2rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700;display:inline-block}
+.bdg{padding:.2rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700;display:inline-block;max-width:100%;overflow-wrap:anywhere}
 .ok{background:rgba(16,185,129,.15);color:var(--ok)}.er{background:rgba(239,68,68,.15);color:var(--er)}.wn{background:rgba(245,158,11,.15);color:var(--wn)}
 table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;text-align:start;border-bottom:1px solid var(--bd)}
 .hid{display:none!important}.modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:1rem;z-index:99}
@@ -1981,6 +1990,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </head>
 <body>
 <div id="lBox" class="modal"><div class="card" style="width:100%;max-width:350px">
+  <div style="text-align:end;margin:-.2rem 0 .2rem"><button class="btn btn-s langBtn" onclick="toggleLang()" title="Language / زبان">EN</button></div>
   <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>
   <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
   <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
@@ -2029,7 +2039,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;flex-wrap:wrap;gap:.5rem">
   <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN <span id="ver" class="bdg ok" style="font-size:.62rem;vertical-align:middle;letter-spacing:0" dir="ltr" title="Panel version">v__VERSION__</span></h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
   <div>
-    <button class="btn btn-s" onclick="document.documentElement.dir=document.documentElement.dir==='rtl'?'ltr':'rtl'">FA / EN</button>
+    <button class="btn btn-s langBtn" onclick="toggleLang()" title="Language / زبان">EN</button>
     <button class="btn btn-s" onclick="load(1)">🔄</button>
     <button class="btn btn-s btn-e" onclick="localStorage.removeItem('tok');location.reload()">Logout</button>
   </div>
@@ -2121,14 +2131,14 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       </div>
       <label>رمز SSH سرور جدید</label><input id="tnW" type="password" autocomplete="off" autocapitalize="none">
       <button id="tnGo" class="btn" style="width:100%" onclick="tunSetup()">⚡ نصب و برقراری تانل</button>
-      <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.7">رمز فقط برای نصب کلید SSH استفاده می‌شود و ذخیره نمی‌شود. بعد از آن ارتباط با کلید است.<br>
-      ⚠️ پنل روی HTTP ساده است؛ اگر نمی‌خواهی رمز سرور روی HTTP برود، در ترمینال این سرور بزن:<br><code dir="ltr">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code></div>
+      <div data-th="tnNote" style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.7">رمز فقط برای نصب کلید SSH استفاده می‌شود و ذخیره نمی‌شود؛ بعد از آن ارتباط با کلید است.<br>
+      ⚠️ اگر نمی‌خواهی رمز سرور را در صفحه‌ی وب تایپ کنی، در ترمینال همین سرور بزن:<br><code dir="ltr">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code></div>
     </div>
   </div>
   <div class="card hid" id="tnBiBox">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">↔️ مسیر دوطرفه (همیشه فعال)</h3>
     <div id="tnBi" style="font-size:.85rem;line-height:1.9"></div>
-    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8">موقع ساخت اکانت، ادمین دو انتخاب <bdi dir="ltr"><b>In</b></bdi> و <bdi dir="ltr"><b>Out</b></bdi> دارد: <bdi dir="ltr"><b>In</b></bdi> یعنی کاربر به IP کدام سرور وصل شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (<span dir="ltr">1→1</span>، <span dir="ltr">1→2</span>، <span dir="ltr">2→1</span>، <span dir="ltr">2→2</span>) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
+    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8" data-th="biNote">موقع ساخت اکانت، ادمین دو انتخاب <bdi dir="ltr"><b>In</b></bdi> و <bdi dir="ltr"><b>Out</b></bdi> دارد: <bdi dir="ltr"><b>In</b></bdi> یعنی کاربر به IP کدام سرور وصل شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (<span dir="ltr">1→1</span>، <span dir="ltr">1→2</span>، <span dir="ltr">2→1</span>، <span dir="ltr">2→2</span>) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
   </div>
   <div class="card hid" id="tnPortBox">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">🔌 هماهنگی پورت‌ها و فایروال دو سرور</h3>
@@ -2142,12 +2152,12 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   </div>
   <div class="card" style="font-size:.82rem;line-height:1.9;color:var(--mu)">
     <h3 style="margin-bottom:.5rem;color:var(--tx)">ℹ️ نحوه‌ی کار</h3>
-    <bdi dir="ltr"><b>In</b></bdi> یعنی سروری که کاربر به IP آن وصل می‌شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
+    <div data-th="how">    <bdi dir="ltr"><b>In</b></bdi> یعنی سروری که کاربر به IP آن وصل می‌شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
     ۱) وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد، ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای اکانت‌هایی‌اند که <bdi dir="ltr"><b>Out</b></bdi> آن‌ها «سرور ۱» است. پورت‌ها در تب تنظیمات قابل تغییرند.<br>
     ۲) وقتی <bdi dir="ltr"><b>In</b></bdi> روی «سرور ۲» باشد، پورت‌های این سرور روی سرور ۲ باز می‌شوند و از داخل تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد هرگز دست نمی‌خورد؛ پس دسترسی ادمین به هر دو سرور و به پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
     ۳) اگر تانل قطع شود، هر مسیری که از تانل می‌گذرد <b>بسته</b> می‌شود (به‌جای نشت از IP مستقیم). برقراری مجدد خودکار است.<br>
     ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند. وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد از تانل می‌گذرد. کلاینت همان <span dir="ltr">127.0.0.1:7300</span> را استفاده می‌کند.<br>
-    ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.
+    ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.</div>
   </div>
 </div>
 
@@ -2238,7 +2248,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 
   <div class="card">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">🤖 ربات و هشدار تلگرام</h3>
-    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">ابتدا در تلگرام با @BotFather یک ربات بساز و توکن را اینجا بگذار؛ بعد به ربات پیام <span dir="ltr">/start</span> بده و «پیدا کردن Chat ID» را بزن. اگر تلگرام از روی این سرور باز نمی‌شود، پنل خودکار از مسیر تانل می‌فرستد.</div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem" data-th="tgNote">ابتدا در تلگرام با @BotFather یک ربات بساز و توکن را اینجا بگذار؛ بعد به ربات پیام <span dir="ltr">/start</span> بده و «پیدا کردن Chat ID» را بزن. اگر تلگرام از روی این سرور باز نمی‌شود، پنل خودکار از مسیر تانل می‌فرستد.</div>
     <div class="row">
       <div><label>توکن ربات <span id="tgSet" style="color:var(--ok)"></span></label><input id="tgToken" type="password" placeholder="123456:ABC..." autocomplete="off" autocapitalize="none"></div>
       <div><label>Chat ID</label><input id="tgChat" autocapitalize="none" placeholder="123456789"></div>
@@ -2258,12 +2268,65 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <button class="btn btn-s btn-w" onclick="tgDetect()">🔎 پیدا کردن Chat ID</button>
       <button class="btn btn-s btn-w" onclick="tgBackup()">💾 ارسال بکاپ همین حالا</button>
     </div>
-    <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.8">دستورهای ربات (فقط از Chat ID تنظیم‌شده): <span dir="ltr">/status /users /online /backup</span></div>
+    <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.8" data-th="tgCmd">دستورهای ربات (فقط از Chat ID تنظیم‌شده): <span dir="ltr">/status /users /online /backup</span></div>
   </div>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
+// ---- language: fa (default) / en. Static labels: EN dictionary; paragraphs: data-th blocks; JS sentences: L(fa,en)
+let LANG="fa"; try{LANG=localStorage.getItem("lang")==="en"?"en":"fa"}catch(e){}
+const L=(fa,en)=>LANG==="en"?en:fa;
+const EN={"👥 کاربران": "👥 Users", "🌐 تانل": "🌐 Tunnel", "📈 آمار": "📈 Statistics", "⚙️ تنظیمات سرور": "⚙️ Server settings", "ورود / Login": "Login", "بستن": "Close", "ذخیره": "Save", "💾 ذخیره": "💾 Save", "ذخیره و ادامه": "Save and continue", "(ذخیره شده)": "(saved)", "وضعیت": "Status", "نوع": "Type", "فعال": "Active", "غیرفعال": "Disabled", "آنلاین / کل کاربران": "Online / Total users", "تانل / Dropbear تانل": "Tunnel / Tunnel Dropbear", "BBR / منابع": "BBR / Resources", "🔌 پورت‌های فعال:": "🔌 Active ports:", "رمز عبور": "Password", "🔐 تغییر رمز پیش‌فرض": "🔐 Change the default password", "رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).": "The default password (admin) is not secure. Choose a new one to continue (at least 8 characters).", "رمز جدید": "New password", "تکرار رمز": "Repeat password", "➕ ساخت کاربر جدید": "➕ Create new user", "قالب:": "Template:", "— بدون قالب —": "— No template —", "💾 ذخیره فرم به‌عنوان قالب": "💾 Save form as template", "نام کاربری (انگلیسی)": "Username (English letters)", "پورت پیشنهادی": "Suggested port", "پورت پیشنهادی (فقط برای نمایش/کپی)": "Suggested port (display/copy only)", "حجم (GB | 0=نامحدود)": "Quota (GB | 0 = unlimited)", "روز اعتبار": "Validity (days)", "کاربر همزمان": "Concurrent users", "— به کدام سرور وصل شود": "— which server the user connects to", "— با IP کدام سرور خارج شود": "— whose IP the user leaves with", "سرور ۱": "Server 1", "سرور ۲": "Server 2", "سرور ۱ (این سرور)": "Server 1 (this server)", "سرور ۲ (سرور تانل)": "Server 2 (tunnel server)", "سرور ۲ (تانل نصب نیست)": "Server 2 (tunnel not installed)", "ایجاد اکانت": "Create account", "همه پورت‌ها": "All ports", "📦 ساخت دسته‌ای اکانت": "📦 Bulk account creation", "پیشوند نام": "Name prefix", "تعداد (۱ تا ۲۰۰)": "Count (1 to 200)", "شروع شماره": "Start number", "رمز (خالی = تصادفی برای هر اکانت)": "Password (empty = random per account)", "ایجاد اکانت‌ها": "Create accounts", "📋 لیست کاربران": "📋 Users", "📋 کپی": "📋 Copy", "⬇️ دانلود CSV": "⬇️ Download CSV", "ویرایش کاربر": "Edit user", "رمز جدید (خالی = بدون تغییر)": "New password (empty = unchanged)", "تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر": "Renew: validity from today (days) — empty/0 = unchanged", "صفر کردن ترافیک مصرفی": "Reset used traffic", "با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.": "Changing In/Out cuts this user's active connections.", "لینک اشتراک و QR": "Subscription link & QR", "📋 کپی لینک اشتراک": "📋 Copy subscription link", "🔗 باز کردن": "🔗 Open", "🌐 وضعیت تانل": "🌐 Tunnel status", "🚀 نصب و اتصال تانل (یک کلیک)": "🚀 Install & connect the tunnel (one click)", "IP یا دامنه‌ی سرور جدید (خروجی)": "IP or domain of the new (exit) server", "پورت SSH": "SSH port", "کاربر (باید root باشد)": "User (must be root)", "رمز SSH سرور جدید": "SSH password of the new server", "⚡ نصب و برقراری تانل": "⚡ Install & connect the tunnel", "♻️ نصب مجدد / تغییر سرور": "♻️ Reinstall / change server", "⏳ در حال نصب...": "⏳ Installing...", "🔍 تست خروجی": "🔍 Test exit", "🔄 ری‌استارت تانل": "🔄 Restart tunnel", "🗑️ حذف تانل": "🗑️ Remove tunnel", "تانل نصب نشده": "Tunnel not installed", "🟢 متصل": "🟢 Connected", "🔴 قطع / در حال اتصال": "🔴 Down / connecting", "هنوز تانلی تنظیم نشده. فرم کناری را پر کن.": "No tunnel is configured yet. Fill in the form beside this.", "↔️ مسیر دوطرفه (همیشه فعال)": "↔️ Two-way routing (always on)", "🔌 هماهنگی پورت‌ها و فایروال دو سرور": "🔌 Port coordination & firewalls (both servers)", "پورت سرور ۱": "Port on server 1", "پورت روی سرور ۲": "Port on server 2", "Dropbear تانل": "Tunnel Dropbear", "SSH دوم": "2nd SSH", "هم‌شماره": "Same number", "جابه‌جا شد (مشغول بود)": "Moved (port was busy)", "منتشر نشد": "Not published", "هنوز پورتی منتشر نشده": "No port published yet", "اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.": "If another program has taken this server's Dropbear port, it is replaced by a free one automatically. If a port is busy on server 2, it is published there under another number (this server's ports and existing client configs do not change). The firewall (ufw or firewalld) of both servers is opened for the ports. The same check also runs automatically on every panel start, tunnel install and port change.", "🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور": "🔍 Check & fix conflicts + update the firewalls of both servers", "📜 مراحل نصب": "📜 Installation steps", "هنوز نصبی انجام نشده.": "No installation has been run yet.", "🌐 وضعیت تانل (۲۴ ساعت گذشته)": "🌐 Tunnel status (last 24 hours)", "خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده": "Blue line: latency (ms) · red bar: the tunnel was down", "🖥️ بار سرور (۲۴ ساعت)": "🖥️ Server load (24 h)", "آبی: CPU · نارنجی: RAM": "Blue: CPU · orange: RAM", "📊 مصرف روزانه‌ی کل (۱۴ روز)": "📊 Total daily traffic (14 days)", "🏆 پرمصرف‌ترین کاربران (۷ روز)": "🏆 Top users (7 days)", "تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).": "No tunnel configured or no sample recorded yet (one sample per minute).", "هنوز داده‌ای ثبت نشده": "No data recorded yet", "داده‌ای ثبت نشده": "No data recorded", "🚀 BBR (کنترل ازدحام TCP)": "🚀 BBR (TCP congestion control)", "الگوریتم فعلی": "Current algorithm", "کرنل پشتیبانی نمی‌کند": "Kernel does not support it", "⛔ خاموش کردن BBR": "⛔ Turn BBR off", "🚀 روشن کردن BBR": "🚀 Turn BBR on", "روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.": "Applies to new connections; existing connections keep the previous algorithm until they reconnect.", "👤 نام کاربری و رمز ادمین پنل": "👤 Panel admin username & password", "نام کاربری ادمین": "Admin username", "رمز جدید ادمین": "New admin password", "🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)": "🔌 OpenSSH & Dropbear ports (max 6)", "پورت SSH دوم": "Second SSH port", "پورت SSH اصلی (پنل)": "Main SSH port (panel)", "🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)": "🌐 Dropbear ports for tunnel accounts (max 4)", "ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)": "Save ports (Dropbear connections are briefly dropped)", "پورت (TCP داخل تونل)": "Port (TCP inside the tunnel)", "0.0.0.0 (عمومی)": "0.0.0.0 (public)", "127.0.0.1 (امن)": "127.0.0.1 (safe)", "ذخیره و ری‌استارت BadVPN": "Save and restart BadVPN", "🔒 HTTPS و گواهی": "🔒 HTTPS & certificate", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.": "The panel is served over HTTPS on this port (an old http address is redirected to https automatically). The default certificate is self-signed, so the browser warns. If you have a domain, put a valid certificate (for example from Let's Encrypt) here.", "گواهی (fullchain، فرمت PEM)": "Certificate (fullchain, PEM format)", "کلید خصوصی (PEM)": "Private key (PEM)", "آپلود گواهی": "Upload certificate", "💾 بکاپ و بازیابی": "💾 Backup & restore", "کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.": "Users, quotas, settings, ports, the tunnel key and Telegram in one encrypted file. Do not lose the passphrase; without it the file cannot be restored.", "پسفریز (حداقل ۶ کاراکتر)": "Passphrase (at least 6 characters)", "⬇️ دانلود بکاپ": "⬇️ Download backup", "بازیابی از فایل بکاپ (.ckbk)": "Restore from backup file (.ckbk)", "⬆️ بازیابی (پنل ری‌استارت می‌شود)": "⬆️ Restore (the panel restarts)", "🤖 ربات و هشدار تلگرام": "🤖 Telegram bot & alerts", "توکن ربات": "Bot token", "پسفریز بکاپ خودکار": "Automatic backup passphrase", "ساعت بکاپ روزانه (۰ تا ۲۳)": "Daily backup hour (0 to 23)", "قطع/وصل تانل": "Tunnel down/up", "۹۰٪ و پر شدن حجم": "90% and quota full", "نزدیک/پایان انقضا": "Expiry near/reached", "فشار CPU/RAM": "High CPU/RAM load", "بکاپ روزانه به تلگرام": "Daily backup to Telegram", "📨 پیام آزمایشی": "📨 Test message", "🔎 پیدا کردن Chat ID": "🔎 Find Chat ID", "💾 ارسال بکاپ همین حالا": "💾 Send a backup now", "ℹ️ نحوه‌ی کار": "ℹ️ How it works", "رمز باید حداقل ۸ کاراکتر و غیر از admin باشد": "The password must be at least 8 characters and not 'admin'", "تکرار رمز یکسان نیست": "The passwords do not match", "تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید": "Too many failed attempts; wait 5 minutes", "نام کاربری یا رمز عبور اشتباه است": "Wrong username or password", "پورت‌ها ذخیره شد": "Ports saved", "BadVPN به‌روز شد": "BadVPN updated", "نام کاربری یا رمز جدید را وارد کنید": "Enter a new username or password", "مشخصات ورود تغییر کرد": "Login details changed", "IP و رمز سرور جدید را وارد کن": "Enter the IP and password of the new server", "گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)": "New certificate activated (new connections will use it)", "پسفریز حداقل ۶ کاراکتر": "The passphrase must be at least 6 characters", "فایل بکاپ را انتخاب کن": "Choose the backup file", "پسفریز را وارد کن": "Enter the passphrase", "بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟": "Restore will overwrite the current settings and users. Continue?", "ذخیره شد": "Saved", "پیام ارسال شد": "Message sent", "ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن": "Not sent: check the token/Chat ID or the connection to Telegram (direct and through the tunnel)", "پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن": "No message found. First send /start to the bot, then try again", "بکاپ به تلگرام ارسال شد": "Backup sent to Telegram", "نام قالب:": "Template name:", "پیشوند نام را وارد کن": "Enter a name prefix", "⏳ در حال ساخت...": "⏳ Creating...", "لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن": "The link has not been created yet; try again in a few seconds", "QR در دسترس نیست": "QR unavailable", "ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین": "Restarted; check the status in a few seconds", "تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند.": "Remove the tunnel? Tunnel accounts will become “Direct”.", "✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.": "✔ The tunnel is up. In “Create new user” choose “Server 2” for Out.", "✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.": "✖ Installation failed; no change was made to existing users.", "تانل سالم است": "Tunnel is healthy", "بررسی ابزارهای لازم": "Checking the required tools", "ساخت کلید SSH مخصوص تانل": "Creating the tunnel's SSH key", "تست ورود با کلید": "Testing the key login", "آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)": "Preparing the exit server (PermitTunnel / forwarding / NAT)", "راه‌اندازی تانل روی این سرور": "Starting the tunnel on this server", "انتظار برای برقراری تانل": "Waiting for the tunnel to come up", "تست خروجی اینترنت از مسیر تانل": "Testing internet access through the tunnel", "خطای داخلی": "Internal error", "رمز عبور یا نام کاربری اشتباه است (wrong password/user)": "Wrong password or username", "کاربر باید root باشد (برای ساخت کارت شبکه تانل)": "The user must be root (needed to create the tunnel network device)", "کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)": "SSH key installed on the exit server (the password is not stored)", "PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد": "PermitTunnel + ip_forward + NAT enabled on the exit server", "تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)": "The tunnel is up but the internet test through it got no answer (does the exit server have internet?)"}, ENP=[["ویرایش: {0}", "Edit: {0}"], ["پورت‌های فعال sshd: {0} (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)", "Active sshd ports: {0} (ports defined outside the panel, such as your own main port, are never touched)"], ["دسترس‌پذیری ۲۴ ساعت: {0}٪ · میانگین تأخیر: {1} ms · {2} نمونه قطع", "24 h availability: {0}% · average latency: {1} ms · {2} samples down"], ["بازیابی انجام شد ({0} کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.", "Restore finished ({0} users). The panel restarts in a few seconds; log in again."], ["ارسال نشد: {0}", "Not sent: {0}"], ["قالب «{0}» حذف شود؟", "Delete template “{0}”?"], ["{0} اکانت با پیشوند {1} ساخته شود؟", "Create {0} accounts with prefix {1}?"], ["تانل سالم است. IP خروجی: {0}", "The tunnel is healthy. Exit IP: {0}"], ["تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: {0}", "Tunnel removed. Accounts converted to Direct: {0}"], ["اتصال به {0}:{1} با رمز و نصب کلید", "Connecting to {0}:{1} with the password and installing the key"], ["اتصال SSH برقرار نشد: {0}", "SSH connection failed: {0}"], ["ورود با کلید ناموفق: {0}", "Key login failed: {0}"], ["تداخل پورت روی این سرور رفع شد: {0}", "Port conflicts on this server were fixed: {0}"], ["تانل بالا نیامد: {0}", "The tunnel did not come up: {0}"], ["IP خروجی تانل: {0}", "Tunnel exit IP: {0}"]], HT={"tnNote": "The password is only used to install an SSH key and is not stored; after that the link uses the key.<br>⚠️ If you prefer not to type the server's password into the web page, run this in a terminal on this server:<br><code dir=\"ltr\">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code>", "biNote": "When creating an account the admin has two choices, <bdi dir=\"ltr\"><b>In</b></bdi> and <bdi dir=\"ltr\"><b>Out</b></bdi>: <bdi dir=\"ltr\"><b>In</b></bdi> is which server's IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is which server's IP the user reaches the internet with. All four combinations (<span dir=\"ltr\">1→1</span>, <span dir=\"ltr\">1→2</span>, <span dir=\"ltr\">2→1</span>, <span dir=\"ltr\">2→2</span>) are active and UDPGW (games/calls) works on all of them. No separate mode needs to be configured.", "how": "<bdi dir=\"ltr\"><b>In</b></bdi> is the server whose IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is the server whose IP is seen on the internet. “Server 1” is this server and “Server 2” is the tunnel server.<br>\n    1) When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2”, the traffic goes through the tunnel. This account works on the <b>SSH (OpenSSH)</b> ports and the <b>tunnel Dropbear</b> ports; the normal Dropbear ports are only for accounts whose <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 1”. Ports can be changed in the Settings tab.<br>\n    2) When <bdi dir=\"ltr\"><b>In</b></bdi> is “Server 2”, this server's ports are opened on server 2 and forwarded through the tunnel to this server. Port 22 and any port server 2 itself listens on are never touched, so admin access to both servers and to the panel always stays open. The firewall of server 2 must allow these ports and the real IP of the user is not visible on this server.<br>\n    3) If the tunnel goes down, every path that goes through it is <b>blocked</b> (instead of leaking out through the direct IP). It reconnects automatically.<br>\n    4) UDPGW (games/calls) works on all four combinations. When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2” it goes through the tunnel. The client keeps using <span dir=\"ltr\">127.0.0.1:7300</span>.<br>\n    5) The tunnel runs over SSH (TCP); for better speed keep BBR on for both servers.", "tgNote": "First create a bot in Telegram with @BotFather and paste the token here; then send <span dir=\"ltr\">/start</span> to the bot and press “Find Chat ID”. If Telegram cannot be reached from this server, the panel automatically sends through the tunnel.", "tgCmd": "Bot commands (only from the configured Chat ID): <span dir=\"ltr\">/status /users /online /backup</span>"};
+const FAre=/[؀-ۿ]/, nrm=s=>String(s).replace(/\s+/g," ").trim(), ATTRS=["placeholder","title","aria-label"];
+const PATRE=ENP.map(p=>new RegExp("^"+nrm(p[0]).split(/(\{\d+\})/).map(x=>/^\{\d+\}$/.test(x)?"(.+?)":x.replace(/[.*+?^$()|[\]\\]/g,"\\$&")).join("")+"$","s"));
+function tr(s){
+  const k=nrm(s); if(!FAre.test(k)) return null;
+  const r=EN[k]; if(r!==undefined) return r;
+  for(let i=0;i<PATRE.length;i++){const m=k.match(PATRE[i]); if(m) return ENP[i][1].replace(/\{(\d+)\}/g,(_,j)=>m[+j+1])}
+  return null;
+}
+const inTH=n=>{for(let e=n.parentElement;e;e=e.parentElement){if(e.dataset&&e.dataset.th)return true}return false};
+function trText(n){
+  const v=n.nodeValue; if(!FAre.test(v)) return; const e=tr(v); if(e===null) return;
+  n.__fa=v; n.__en=v.match(/^\s*/)[0]+e+v.match(/\s*$/)[0]; n.nodeValue=n.__en;
+}
+function trEl(el){ATTRS.forEach(a=>{const v=el.getAttribute(a); if(v&&FAre.test(v)){const e=tr(v); if(e!==null){el["__fa_"+a]=v; el.setAttribute(a,e)}}})}
+function trTree(root){
+  if(root.nodeType===3){ if(!inTH(root)) trText(root); return }
+  if(root.nodeType!==1||/^(SCRIPT|STYLE)$/.test(root.tagName)) return;
+  if(root.dataset&&root.dataset.th&&HT[root.dataset.th]!==undefined){ if(root.__fa===undefined) root.__fa=root.innerHTML; root.innerHTML=HT[root.dataset.th]; return }
+  trEl(root); Array.from(root.childNodes).forEach(trTree);
+}
+function revert(){
+  document.querySelectorAll("[data-th]").forEach(el=>{if(el.__fa!==undefined){el.innerHTML=el.__fa; el.__fa=undefined}});
+  const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT); let n;
+  while((n=w.nextNode())){if(n.__fa!==undefined&&n.nodeValue===n.__en) n.nodeValue=n.__fa; n.__fa=undefined}
+  document.querySelectorAll("*").forEach(el=>ATTRS.forEach(a=>{if(el["__fa_"+a]!==undefined){el.setAttribute(a,el["__fa_"+a]); el["__fa_"+a]=undefined}}));
+}
+const MOopt={childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:ATTRS};
+const MO=new MutationObserver(ms=>{
+  if(LANG!=="en") return; MO.disconnect();
+  try{ms.forEach(m=>{
+    if(m.type==="childList") m.addedNodes.forEach(trTree);
+    else if(m.type==="characterData"){const n=m.target; if(n.nodeValue!==n.__en&&!inTH(n)){n.__fa=undefined; trText(n)}}
+    else if(m.type==="attributes") trEl(m.target);
+  })}finally{MO.observe(document.body,MOopt)}
+});
+const _al=window.alert.bind(window), _cf=window.confirm.bind(window), _pr=window.prompt.bind(window);
+const trMsg=m=>{if(LANG!=="en") return m; const e=tr(String(m)); return e===null?m:e};
+window.alert=m=>_al(trMsg(m)); window.confirm=m=>_cf(trMsg(m)); window.prompt=(m,d)=>_pr(trMsg(m),d);
+function setLang(l,init){
+  LANG=l; try{localStorage.setItem("lang",l)}catch(e){}
+  const h=document.documentElement; h.lang=l; h.dir=l==="en"?"ltr":"rtl";
+  MO.disconnect();
+  if(l==="en"){trTree(document.body); MO.observe(document.body,MOopt)} else revert();
+  document.querySelectorAll(".langBtn").forEach(b=>b.textContent=l==="en"?"FA":"EN");
+  if(!init&&tok&&$("lBox").classList.contains("hid")){
+    load(1); if(!$("secT").classList.contains("hid")) loadTun(); if(!$("secH").classList.contains("hid")) loadHist(); if(!$("secS").classList.contains("hid")){loadCert();loadTg()}
+  }
+}
+function toggleLang(){setLang(LANG==="en"?"fa":"en")}
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let tnCfg={};
 let tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="";
@@ -2299,7 +2362,7 @@ function fillPorts(cn,ce){
   if([...$("npt").options].some(o=>o.value===n)) $("npt").value=n;
   if([...$("ept").options].some(o=>o.value===e)) $("ept").value=e;
   const ip=v=>v==="B"?(tnCfg.host||"سرور ۲"):location.hostname, xp=v=>v==="B"?(tnCfg.exit||tnCfg.host||"سرور ۲"):location.hostname;
-  const hint=(en,ex)=>`کاربر به <b dir="ltr">${esc(ip(en))}</b> وصل می‌شود و با IP <b dir="ltr">${esc(xp(ex))}</b> به اینترنت می‌رسد.`;
+  const hint=(en,ex)=>L(`کاربر به <b dir="ltr">${esc(ip(en))}</b> وصل می‌شود و با IP <b dir="ltr">${esc(xp(ex))}</b> به اینترنت می‌رسد.`,`The user connects to <b dir="ltr">${esc(ip(en))}</b> and reaches the internet with the IP <b dir="ltr">${esc(xp(ex))}</b>.`);
   $("nHint").innerHTML=hint($("nen").value,$("nex").value); $("eHint").innerHTML=hint($("een").value,$("eex").value);
 }
 async function api(u,m="GET",b=null){
@@ -2395,7 +2458,7 @@ async function delU(u){if(confirm("Delete "+u+"?")){await api("/api/user/del","P
 async function savePorts(){
   const r=await api("/api/ports","POST",{ssh:$("s1").value,ssh2:$("s2").value,db:[1,2,3,4,5,6].map(i=>$("d"+i).value),tdb:[1,2,3,4].map(i=>$("td"+i).value)});
   if(!r.ok){alert(r.msg||"Error");return}
-  alert("پورت‌ها ذخیره شد"+(r.dropped&&r.dropped.length?"\nنادیده گرفته شد (تکراری/رزرو): "+r.dropped.join(", "):""));
+  alert(L("پورت‌ها ذخیره شد","Ports saved")+(r.dropped&&r.dropped.length?L("\nنادیده گرفته شد (تکراری/رزرو): ","\nIgnored (duplicate/reserved): ")+r.dropped.join(", "):""));
   load(1);
 }
 async function saveBv(){
@@ -2427,7 +2490,7 @@ async function loadTun(){
   let d; try{d=await api("/api/tunnel")}catch(e){return}
   const sp=d.setup||{steps:[]}; const run=!!sp.run;
   $("tnStat").innerHTML=!d.conf?'<span class="bdg wn">تانل نصب نشده</span>':(d.up?'<span class="bdg ok">🟢 متصل</span>':'<span class="bdg er">🔴 قطع / در حال اتصال</span>');
-  $("tnInfo").innerHTML=d.conf?`سرور خروجی: <b dir="ltr">${esc(d.user)}@${esc(d.host)}:${esc(d.port)}</b><br>IP خروجی: <b dir="ltr">${esc(d.exit||"—")}</b><br>پورت‌های Dropbear تانل: <b dir="ltr">${esc((d.tdb||[]).join(", ")||"—")}</b><br>اکانت‌های تانل: <b>${(d.users||[]).length}</b>`:"هنوز تانلی تنظیم نشده. فرم کناری را پر کن.";
+  $("tnInfo").innerHTML=d.conf?L(`سرور خروجی: <b dir="ltr">${esc(d.user)}@${esc(d.host)}:${esc(d.port)}</b><br>IP خروجی: <b dir="ltr">${esc(d.exit||"—")}</b><br>پورت‌های Dropbear تانل: <b dir="ltr">${esc((d.tdb||[]).join(", ")||"—")}</b><br>اکانت‌های تانل: <b>${(d.users||[]).length}</b>`,`Exit server: <b dir="ltr">${esc(d.user)}@${esc(d.host)}:${esc(d.port)}</b><br>Exit IP: <b dir="ltr">${esc(d.exit||"—")}</b><br>Tunnel Dropbear ports: <b dir="ltr">${esc((d.tdb||[]).join(", ")||"—")}</b><br>Tunnel accounts: <b>${(d.users||[]).length}</b>`):"هنوز تانلی تنظیم نشده. فرم کناری را پر کن.";
   $("tnBtns").classList.toggle("hid",!d.conf);
   $("tnBiBox").classList.toggle("hid",!d.conf);
   $("tnPortBox").classList.toggle("hid",!d.conf);
@@ -2439,15 +2502,15 @@ async function loadTun(){
   }
   if(d.conf){
     const me=location.hostname;
-    $("tnBi").innerHTML=`<div>سرور ۱ (این سرور): <b dir="ltr">${esc(me)}</b> &nbsp;|&nbsp; سرور ۲: <b dir="ltr">${esc(d.host)}</b> <span style="color:var(--mu)">(IP خروجی: <span dir="ltr">${esc(d.exit||d.host)}</span>)</span></div>`
-      +`<div>پورت‌هایی که روی سرور ۲ به این سرور فوروارد شده‌اند: <b dir="ltr">${esc((d.rev_map||[]).map(r=>r.b).join(", ")||"—")}</b></div>`
-      +((d.rev_skipped||[]).length?`<div style="color:var(--wn)">⚠️ این پورت‌ها روی سرور ۲ از قبل مشغول‌اند و فوروارد نشدند: <b dir="ltr">${esc(d.rev_skipped.join(", "))}</b></div>`:"");
+    $("tnBi").innerHTML=L(`<div>سرور ۱ (این سرور): <b dir="ltr">${esc(me)}</b> &nbsp;|&nbsp; سرور ۲: <b dir="ltr">${esc(d.host)}</b> <span style="color:var(--mu)">(IP خروجی: <span dir="ltr">${esc(d.exit||d.host)}</span>)</span></div>`,`<div>Server 1 (this server): <b dir="ltr">${esc(me)}</b> &nbsp;|&nbsp; Server 2: <b dir="ltr">${esc(d.host)}</b> <span style="color:var(--mu)">(exit IP: <span dir="ltr">${esc(d.exit||d.host)}</span>)</span></div>`)
+      +L(`<div>پورت‌هایی که روی سرور ۲ به این سرور فوروارد شده‌اند: <b dir="ltr">${esc((d.rev_map||[]).map(r=>r.b).join(", ")||"—")}</b></div>`,`<div>Ports forwarded from server 2 to this server: <b dir="ltr">${esc((d.rev_map||[]).map(r=>r.b).join(", ")||"—")}</b></div>`)
+      +((d.rev_skipped||[]).length?L(`<div style="color:var(--wn)">⚠️ این پورت‌ها روی سرور ۲ از قبل مشغول‌اند و فوروارد نشدند: <b dir="ltr">${esc(d.rev_skipped.join(", "))}</b></div>`,`<div style="color:var(--wn)">⚠️ These ports are already in use on server 2 and were not forwarded: <b dir="ltr">${esc(d.rev_skipped.join(", "))}</b></div>`):"");
   }
   $("tnGo").disabled=run; $("tnGo").innerText=run?"⏳ در حال نصب...":(d.conf?"♻️ نصب مجدد / تغییر سرور":"⚡ نصب و برقراری تانل");
   if(sp.steps.length){
     const ic={run:"⏳",ok:"✅",err:"❌",warn:"⚠️"}, cl={err:"var(--er)",warn:"var(--wn)"};
-    $("tnLog").innerHTML=sp.steps.map(x=>`<div>${ic[x.s]||""} ${esc(x.m)}${x.d?`<div style="font-size:.78rem;padding-inline-start:1.5rem;color:${cl[x.s]||"var(--mu)"}">${esc(x.d)}</div>`:""}</div>`).join("")
-      +(!run&&sp.ok===true?'<div style="color:var(--ok);margin-top:.5rem"><b>✔ تانل برقرار شد. در «ساخت کاربر» نوع اکانت را «تانل» انتخاب کن.</b></div>':"")
+    $("tnLog").innerHTML=sp.steps.map(x=>`<div><span>${ic[x.s]||""}</span> <span>${esc(x.m)}</span>${x.d?`<div style="font-size:.78rem;padding-inline-start:1.5rem;color:${cl[x.s]||"var(--mu)"}">${esc(x.d)}</div>`:""}</div>`).join("")
+      +(!run&&sp.ok===true?'<div style="color:var(--ok);margin-top:.5rem"><b>✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.</b></div>':"")
       +(!run&&sp.ok===false?'<div style="color:var(--er);margin-top:.5rem"><b>✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.</b></div>':"");
   }
 }
@@ -2459,21 +2522,21 @@ async function tunSetup(){
 }
 async function tunPorts(){
   const r=await api("/api/tunnel/ports","POST",{}); const m=[];
-  (r.a_changes||[]).forEach(c=>m.push(`سرور ۱: پورت ${c.from} (مشغول توسط ${c.by||"برنامه‌ی دیگر"}) ← ${c.to}`));
-  (r.map||[]).filter(x=>x.a!==x.b).forEach(x=>m.push(`سرور ۲: پورت ${x.a} مشغول بود ← منتشر شد روی ${x.b}`));
-  if(!m.length) m.push("تداخلی پیدا نشد.");
-  m.push(`فایروال سرور ۱: ${r.fw_a||"-"} | سرور ۲: ${r.fw_b||"-"}`);
-  if(r.err) m.push("خطا: "+r.err);
+  (r.a_changes||[]).forEach(c=>m.push(L(`سرور ۱: پورت ${c.from} (مشغول توسط ${c.by||"برنامه‌ی دیگر"}) ← ${c.to}`,`Server 1: port ${c.from} (in use by ${c.by||"another program"}) → ${c.to}`)));
+  (r.map||[]).filter(x=>x.a!==x.b).forEach(x=>m.push(L(`سرور ۲: پورت ${x.a} مشغول بود ← منتشر شد روی ${x.b}`,`Server 2: port ${x.a} was busy → published on ${x.b}`)));
+  if(!m.length) m.push(L("تداخلی پیدا نشد.","No conflicts found."));
+  m.push(L(`فایروال سرور ۱: ${r.fw_a||"-"} | سرور ۲: ${r.fw_b||"-"}`,`Firewall server 1: ${r.fw_a||"-"} | server 2: ${r.fw_b||"-"}`));
+  if(r.err) m.push(L("خطا: ","Error: ")+r.err);
   alert(m.join("\n")); load(1); loadTun();
 }
 // ---- version / feature warnings
 function ovExtra(d){
   if($("ver")&&d.ver) $("ver").innerText="v"+d.ver;
-  const w=[]; if(!d.fer) w.push("python3-cryptography نصب نیست: رمزها رمزنگاری نمی‌شوند و بکاپ کار نمی‌کند."); if(!d.qr) w.push("python3-qrcode نصب نیست: QR نمایش داده نمی‌شود.");
+  const w=[]; if(!d.fer) w.push(L("python3-cryptography نصب نیست: رمزها رمزنگاری نمی‌شوند و بکاپ کار نمی‌کند.","python3-cryptography is not installed: passwords are not encrypted and backups do not work.")); if(!d.qr) w.push(L("python3-qrcode نصب نیست: QR نمایش داده نمی‌شود.","python3-qrcode is not installed: QR codes are not shown."));
   $("bkWarn").innerText=w.join(" ");
 }
 // ---- HTTPS
-async function loadCert(){const d=await api("/api/cert"); $("certInfo").innerText=(d.https?"HTTPS: ON":"HTTPS: OFF (HTTP ساده)")+"\n"+(d.info||"")}
+async function loadCert(){const d=await api("/api/cert"); $("certInfo").innerText=(d.https?"HTTPS: ON":L("HTTPS: OFF (HTTP ساده)","HTTPS: OFF (plain HTTP)"))+"\n"+(d.info||"")}
 async function saveCert(){
   const r=await api("/api/cert","POST",{cert:$("certPem").value,key:$("certKey").value});
   alert(r.ok?"گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)":(r.msg||"Error")); if(r.ok){$("certPem").value="";$("certKey").value="";loadCert()}
@@ -2510,7 +2573,7 @@ async function tgDetect(){
   await saveTg(); const r=await api("/api/telegram/detect","POST",{});
   if(!r.ok){alert(r.msg||"Error");return}
   if(!(r.chats||[]).length){alert("پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن");return}
-  $("tgChat").value=r.chats[r.chats.length-1].id; alert("Chat ID پیدا شد: "+r.chats.map(c=>c.id+" ("+c.name+")").join(", ")+"\nذخیره را بزن.");
+  $("tgChat").value=r.chats[r.chats.length-1].id; alert(L("Chat ID پیدا شد: ","Chat ID found: ")+r.chats.map(c=>c.id+" ("+c.name+")").join(", ")+L("\nذخیره را بزن.","\nPress Save."));
 }
 async function tgBackup(){const r=await api("/api/telegram/backup","POST",{}); alert(r.ok?"بکاپ به تلگرام ارسال شد":("ارسال نشد: "+(r.msg||"")))}
 // ---- templates
@@ -2535,7 +2598,7 @@ async function doBulk(){
   const r=await api("/api/user/bulk","POST",b);
   if(!r.ok){$("bkRes").innerHTML="";alert(r.msg||"Error");return}
   const host=location.hostname, lines=r.created.map(x=>x.u+"\t"+x.pw), txt="user\tpassword\n"+lines.join("\n");
-  $("bkRes").innerHTML=`<div style="color:var(--ok);margin-bottom:.4rem">✅ ${r.created.length} اکانت ساخته شد${r.errors.length?` · <span style="color:var(--er)">${r.errors.length} خطا</span>`:""}</div>
+  $("bkRes").innerHTML=`<div style="color:var(--ok);margin-bottom:.4rem">${L(`✅ ${r.created.length} اکانت ساخته شد`,`✅ ${r.created.length} accounts created`)}${r.errors.length?` · <span style="color:var(--er)">${r.errors.length} ${L("خطا","errors")}</span>`:""}</div>
     <textarea id="bkOut" rows="6" dir="ltr" readonly>${esc(txt)}</textarea>
     <div style="display:flex;gap:.4rem;flex-wrap:wrap"><button class="btn btn-s" onclick="bulkCopy()">📋 کپی</button><button class="btn btn-s btn-o" onclick="bulkDl()">⬇️ دانلود CSV</button></div>
     ${r.errors.length?`<div style="font-size:.78rem;color:var(--er);margin-top:.4rem">${r.errors.map(e=>esc(e.u+": "+e.msg)).join("<br>")}</div>`:""}`;
@@ -2594,6 +2657,7 @@ async function tunRemove(){
   const r=await api("/api/tunnel/remove","POST",{});
   alert(r.ok?("تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: "+(r.converted||0)):(r.msg||"Error")); load(1); loadTun();
 }
+if(LANG==="en") setLang("en",true); else{document.documentElement.lang="fa";document.documentElement.dir="rtl";document.querySelectorAll(".langBtn").forEach(b=>b.textContent="EN")}
 if(tok){$("lBox").classList.add("hid");load(1);loadTpl().catch(()=>{})}
 setInterval(()=>{if(tok&&$("lBox").classList.contains("hid"))load(0)},4000);
 setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secT").classList.contains("hid"))loadTun()},2000);
