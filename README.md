@@ -1,75 +1,142 @@
-SSH Plus Panel (web panel branded CK.VPN)
+# CK.VPN — SSH Plus Panel
 
-One-command installer for an SSH tunnel server on Ubuntu: OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR, with a lightweight web panel for managing users.
+One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear + BadVPN UDPGW + BBR**, a **two-server tunnel**, and a web panel (**CK.VPN**) for managing accounts.
 
-English | فارسی
+**Language: [English](#english) | [فارسی](#فارسی)**
+
+---
 
 <a name="english"></a>
 
-English
+## English
 
-Features
+### Features
 
-	•	OpenSSH direct access (ports 22 and 2222 by default; any extra SSH port you configured yourself, such as a custom main port, is never touched).
-	•	Dropbear on up to 6 configurable ports.
-	•	BadVPN UDPGW (default 127.0.0.1:7300) for UDP traffic such as online games, DNS and calls through the SSH tunnel.
-	•	BBR congestion control, installed automatically and switchable from the panel.
-	•	Web panel (port 2053):
-	•	create, edit, delete users
-	•	traffic quota (GB), expiry date, simultaneous-login limit
-	•	live online-user count, CPU / RAM / network stats
-	•	change SSH, Dropbear and BadVPN ports
-	•	turn BBR on/off
-	•	one-click copy of a user's connection info
-	•	Login rate limit on the panel (5 failed attempts per 5 minutes).
-	•	Tunnel (v1.1.0): one-click SSH tunnel to a second exit server; each account is either Direct or Tunnel.
-	•	v1.5.0: HTTPS + forced first-login password change; encrypted backup/restore; encrypted password storage; Telegram bot and alerts (also through the tunnel); account templates and bulk creation; per-account subscription page with QR; statistics tab (tunnel health, load, daily traffic).
-	•	Safe to re-run: existing users, ports and settings are kept.
+**Core**
+- OpenSSH direct access (ports 22 and 2222 by default; any extra SSH port you configured yourself is never touched).
+- Dropbear on up to 6 configurable ports.
+- BadVPN UDPGW (default `127.0.0.1:7300`) for UDP traffic such as online games, DNS and calls through the SSH tunnel.
+- BBR congestion control, installed automatically and switchable from the panel.
 
-Requirements
+**Web panel (HTTPS, port 2053)**
+- Create, edit, delete accounts; traffic quota (GB), expiry date, simultaneous-login limit.
+- Account **templates** and **bulk creation** (1–200 accounts, random or shared passwords, CSV export).
+- Per-account **subscription page + QR code**.
+- Live online users, CPU / RAM / network, **statistics tab** (tunnel health, load, daily traffic, top users).
+- Change SSH, Dropbear and BadVPN ports, turn BBR on/off, one-click copy of connection info.
 
-	•	Ubuntu 22.04 or 24.04 (fresh server recommended)
-	•	Root access
-	•	Internet access (packages and BadVPN are downloaded and compiled during install)
+**Tunnel (two servers)**
+- One-click SSH tunnel to a second "exit" server.
+- Per account choose **In** (which server the user connects to) and **Out** (whose IP the user leaves with): `1→1`, `1→2`, `2→1`, `2→2`.
+- UDPGW works on all four combinations; fail-closed when the tunnel is down; automatic reconnect.
+- Port conflict detection/repair on both servers and firewall (ufw / firewalld) updates on both.
 
-Install
+**Security and operations**
+- HTTPS with automatic self-signed certificate (upload your own in Settings), forced change of the default password at first login, login rate limit (5 failures / 5 minutes).
+- Passwords shown in the panel are encrypted at rest.
+- Encrypted backup / restore.
+- Telegram bot: alerts and daily backup.
+- Safe to re-run: existing users, ports, tunnel and settings are kept.
 
+### Requirements
+- Ubuntu 22.04 or 24.04 (fresh server recommended), root access.
+- Internet access (packages and BadVPN are downloaded/compiled during install).
+- For the tunnel: a second Linux server (Debian/Ubuntu with systemd) where root can log in with a password **once** during setup.
+
+### Install
+
+```bash
 bash <(curl -Ls https://raw.githubusercontent.com/Sinakhani70/sshplus-panel/main/install.sh)
+```
 
-If curl is missing:
+If curl is missing: `apt-get update && apt-get install -y curl`
 
-apt-get update && apt-get install -y curl
+Run it **only on the panel server** ("server 1"). The exit server is configured by the panel over SSH — never run the installer there.
 
-At the end of the install you should see something like:
+At the end you should see something like:
 
+```
 Panel:     active
-Dropbear:  active
-BadVPN:    active
+Dropbear:  active   (tunnel instance: active)
+Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)
+BadVPN:    active   (tunnel instance: active)
 SSH:       active
 BBR:       bbr / fq
-Panel URL: http://YOUR_SERVER_IP:2053  (admin / admin)
+Version:   1.5.1
+Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must change it)
+```
 
-After install
+### After install
+1. Open `https://YOUR_SERVER_IP:2053`. The default certificate is self-signed, so the browser warns once — continue. (An old `http://` address is redirected to `https://`.)
+2. Log in with `admin` / `admin`. The panel asks for a new password (8+ characters) and stays locked until you set it.
+3. Create an account. In your SSH client connect to the server IP using one of the Dropbear / SSH ports shown in the panel.
+4. Set the UDPGW address in your client to `127.0.0.1:7300`.
+5. Settings → **Backup**: download a backup and keep the passphrase safe. Optionally connect Telegram (see below).
 
-	1.	Open http://YOUR_SERVER_IP:2053.
-	2.	Log in with admin / admin and change the password immediately (Settings tab).
-	3.	Create a user.
-	4.	In your SSH client, connect to the server IP using one of the Dropbear or SSH ports shown in the panel.
-	5.	Set the UDPGW address in your client to 127.0.0.1:7300 (or the port you chose in the panel).
+The version is shown next to the logo, so you always know what is installed.
 
-Useful commands
+### Updating
+Run the same install command again on server 1. Users, ports, tunnel, passwords and settings are kept. The panel re-applies the exit-server side by itself a few seconds after it starts. After updating from a version older than 1.5 the panel address is `https://`.
 
-# change the panel admin login from the terminal
+### Tunnel
+
+Users connect to this server (server 1). The exit server (server 2) is only used for the traffic you send through it.
+
+**Set up** — Panel → **Tunnel** tab → exit server IP, SSH port, root password → **Install & connect**. One click installs a key-based SSH login, prepares the exit server (`PermitTunnel`, IP forwarding, NAT, firewall) and brings up an SSH layer-3 tunnel (`ssh -w`, device `tun99`, `10.99.0.0/30`). The password is used once and never stored. Terminal alternative (nothing typed into the web page): `sshplus-tunnel-setup EXIT_IP [PORT] [USER]`.
+
+**In / Out per account** — when you create or edit an account:
+
+| In | Out | Meaning |
+|----|-----|---------|
+| server 1 | server 1 | normal "Direct" account |
+| server 1 | server 2 | "Tunnel" account: user connects to server 1, leaves with server 2's IP |
+| server 2 | server 1 | user connects to server 2's IP, leaves with server 1's IP |
+| server 2 | server 2 | user connects to and leaves with server 2's IP |
+
+- Out = server 2 accounts work on the OpenSSH ports and the dedicated **tunnel Dropbear** ports (default 2087, 2096); the normal Dropbear ports accept only Out = server 1 accounts.
+- In = server 2: this server's ports are published on the exit server and forwarded through the tunnel. Port 22 and every port the exit server already listens on are never taken over, so admin access to both servers stays open. Entry via server 2 is *published*, not enforced (the same account can also connect straight to server 1); the Out side is enforced.
+- **Fail-closed:** if the tunnel is down, every path that goes through it is blocked instead of leaking out through the wrong IP (IPv6 is blocked for tunnel accounts). The tunnel reconnects automatically.
+- **UDPGW** (games/calls) works on all combinations; for Out = server 2 a second badvpn instance (UDP port + 1) runs in the tunnel path and connections to `127.0.0.1:7300` are redirected to it transparently, so clients keep the same setting.
+
+**Port coordination and firewalls** — the installer and the panel never pick ports that another program (nginx, x-ui, …) already listens on; a configured port that gets taken is replaced by a free one. On the exit server a busy port is published under another number (e.g. 442 → 10442) so this server's ports and client configs do not change. ufw / firewalld of **both** servers are updated. The Tunnel tab shows the port table and a **Check & fix conflicts** button; the check also runs on panel start, tunnel install and every port change. Your cloud provider's own firewall / security group must still allow the published ports.
+
+**Limits** — the tunnel is IPv4-only and runs over TCP/SSH (keep BBR on for both servers); one exit server at a time; users entering through server 2 are seen by server 1 with the exit server's address.
+
+### Panel features
+
+**Subscription page and QR** — every account has a secret link `https://HOST:2053/s/<token>` (button 🔗 in the account list): a login-free page with expiry, usage, connection info (follows In/Out and port mapping), an `ssh://` link and a QR code. Wrong tokens are rate-limited per IP.
+
+**Templates and bulk creation** — save the create form as a template and apply it later. *Bulk creation*: prefix + count (1–200) + days/quota/limit/In/Out; random passwords (or one shared password); copy or download the result as CSV; name collisions are reported per account.
+
+**Statistics tab** — every minute the panel records tunnel state and latency, CPU/RAM and per-user traffic: tunnel availability (24 h), server load (24 h), daily traffic (14 days), top users (7 days).
+
+**Backup and restore** — Settings → Backup. One file with users (including password hashes and expiry), quota/usage, ports, tunnel configuration and SSH key, Telegram settings, templates and history, encrypted with a passphrase you choose. Restore re-creates missing Linux accounts, re-applies the tunnel and restarts the panel. Without the passphrase the file cannot be opened.
+
+**Telegram** — Settings → Telegram:
+1. Create a bot with `@BotFather` and paste the token.
+2. Send `/start` to the bot and press **Find chat id**, then Save.
+3. Choose the alerts: tunnel down/up, quota 90% / full, account expiring (3 days) / expired, CPU/RAM high for 3 minutes (each alert is sent once, no spam), daily encrypted backup (needs a backup passphrase and an hour).
+4. Bot commands (only from the configured chat): `/status`, `/users`, `/online`, `/backup`.
+
+If Telegram cannot be reached from the server (it is often blocked), the panel automatically falls back to the tunnel and remembers what worked.
+
+**HTTPS** — Settings → HTTPS shows the current certificate. To use a real certificate (for example from Let's Encrypt, if you have a domain) paste the full chain and the private key there; they are checked before being activated.
+
+### Useful commands
+
+```bash
+# change the panel admin login from the terminal (also the way back in if you forget it)
 sshplus-pass NEWUSER NEWPASSWORD
 
 # set up / replace the tunnel from the terminal
 sshplus-tunnel-setup EXIT_IP [PORT] [USER]
 
 # service status
-systemctl status sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel badvpn
+systemctl status sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel badvpn badvpn-t
 
 # logs
 journalctl -u sshplus-dropbear -n 50 --no-pager
+journalctl -u sshplus-tunnel -n 50 --no-pager
 tail -50 /var/log/sshplus/install.log
 
 # listening ports
@@ -77,121 +144,187 @@ ss -tlnp | grep -E 'dropbear|badvpn|sshd'
 
 # check BBR
 sysctl net.ipv4.tcp_congestion_control
+```
 
-Files
+### Files
 
-Path	Purpose
-/opt/sshplus-panel/	panel (app.py, index.html)
-/etc/SSHPlus/	settings (panel.json, ports.json, badvpn.conf, meta.json, tunnel.conf, tunnel_key)
-/etc/ssh/sshd_config.d/00-sshplus.conf	OpenSSH settings managed by the panel
-/var/log/sshplus/install.log	install log
+| Path | Purpose |
+|------|---------|
+| `/opt/sshplus-panel/` | panel (`app.py`, `index.html`) |
+| `/etc/SSHPlus/panel.json` | panel login and port |
+| `/etc/SSHPlus/ports.json`, `badvpn.conf` | SSH / Dropbear / tunnel-Dropbear ports, UDPGW settings |
+| `/etc/SSHPlus/meta.json` | per-account data (encrypted passwords, quota, usage, subscription token) |
+| `/etc/SSHPlus/secret.key` | key for the encrypted values (root only) |
+| `/etc/SSHPlus/panel.crt`, `panel.key` | HTTPS certificate |
+| `/etc/SSHPlus/tunnel.conf`, `tunnel_key`, `tunnel_known_hosts` | tunnel configuration and its SSH key |
+| `/etc/SSHPlus/telegram.json`, `templates.json`, `history.json` | Telegram settings, account templates, statistics |
+| `/etc/ssh/sshd_config.d/00-sshplus.conf` | OpenSSH settings managed by the panel |
+| `/var/log/sshplus/install.log` | install log |
 
-Tunnel (new in v1.1.0)
+### Security notes
+- The panel is served over HTTPS on port 2053 (self-signed certificate by default, so the browser warns; upload your own in Settings). The default `admin/admin` must be changed at the first login; the panel is locked until then.
+- Passwords shown in the panel are encrypted at rest (Fernet) in `meta.json`. The key `/etc/SSHPlus/secret.key` lives on the same server (root only), so this protects copies of the file and backups, **not** a compromised root. The real account passwords are only hashes in `/etc/shadow`, as usual.
+- Backups contain the tunnel's private key and password hashes — they are encrypted, but keep the file and the passphrase apart.
+- Traffic accounting is approximate (per-process I/O counters); do not rely on it for exact billing.
+- Dropbear connections are briefly dropped when ports are changed from the panel.
+- Tunnel: the exit server's password typed in the Tunnel tab goes over the panel's HTTPS; with the self-signed certificate make sure you really reached your own panel (check the certificate once) or use `sshplus-tunnel-setup`. The tunnel's SSH key gives server 1 root access to the exit server, so protect server 1. The exit server's host key is trusted on first connection.
+- `PermitRootLogin yes` is enabled for compatibility. Consider SSH keys for root and disabling password login for it.
 
-Send selected accounts out through a second "exit" server. Users still connect to THIS server: "Tunnel" accounts reach the internet with the exit server's IP, "Direct" accounts with this server's IP.
+### Uninstall
 
-	•	Panel → Tunnel tab → enter the exit server's IP, SSH port and root password → "Install & connect". One click does everything on both servers: installs a key-based SSH login, prepares the exit server (PermitTunnel, IP forwarding, NAT) and brings up an SSH layer-3 tunnel (ssh -w, device tun99, 10.99.0.0/30). The password is used once and never stored.
-	•	Terminal alternative (the password never goes through the panel's plain HTTP): sshplus-tunnel-setup EXIT_IP [PORT] [USER]
-	•	Create user → "Account type": Direct or Tunnel (can be changed later when editing the user).
-	•	Tunnel accounts work on the OpenSSH ports and on dedicated "Tunnel Dropbear" ports (default 2087 and 2096, changeable in Settings). The normal Dropbear ports accept only Direct accounts; the tunnel Dropbear ports accept only Tunnel accounts.
-	•	Fail-closed: if the tunnel is down, Tunnel accounts get no connectivity at all (they never leak out through this server's IP). The tunnel reconnects automatically.
-	•	Bidirectional by default (v1.3.0): nothing to configure in the Tunnel tab. When you create or edit an account you pick "In" (which server the user connects to: server 1 = this server, server 2 = the exit server) and "Out" (whose IP the user leaves with). All four combinations work: 1→1 (Direct), 1→2 (Tunnel), 2→1, 2→2. For "In = server 2" the exit server forwards this server's ports through the tunnel; port 22 and every port the exit server already listens on are never taken over, so admin access to both servers and the panel stays open. Open the forwarded ports in the exit server's firewall; users' real IPs are not visible on this server when they enter through server 2.
-	•	UDPGW (BadVPN, games/calls) works on all four In/Out combinations. For "Out = server 2" it goes through the tunnel: a second badvpn instance (UDP port+1) runs in the tunnel path and connections to 127.0.0.1:7300 are redirected to it transparently, so clients keep the same setting.
-	•	Port coordination and firewalls (v1.4.0): the installer and the panel skip/replace Dropbear ports that another program already listens on; a port that is busy on the exit server is published there under another number (e.g. 442 → 10442) instead of being dropped, so this server's ports and existing client configs do not change. The ufw/firewalld rules of BOTH servers are updated for the ports. The Tunnel tab shows the port table and has a "check & fix conflicts" button; the check also runs automatically on panel start, tunnel install and every port change.
-	•	Limits: the tunnel is IPv4-only (IPv6 is blocked for Tunnel accounts); the tunnel runs over TCP/SSH so keep BBR on for both servers; one exit server at a time; the exit server must be Linux with systemd and allow root SSH login with a password for the one-time setup; needs cgroup v2 (Ubuntu 22.04/24.04).
+Remove the tunnel in the panel first (it also takes the forwarded ports back from the exit server), then:
 
-Security notes
-
-	•	The panel is served over HTTPS on port 2053 (self-signed certificate by default, so the browser warns; upload your own in Settings; plain http:// is redirected to https://). The default login admin/admin must be changed at the first login, the panel is locked until then.
-	•	User passwords shown in the panel are encrypted at rest (Fernet) in /etc/SSHPlus/meta.json; the key /etc/SSHPlus/secret.key lives on the same server (root-only), so this protects copies of the file and backups, not a compromised root. The real account passwords are only hashes in /etc/shadow, as usual.
-	•	Traffic accounting is approximate (based on per-process I/O counters); do not rely on it for exact billing.
-	•	Dropbear connections are briefly dropped when ports are changed from the panel.
-	•	Tunnel: the exit server's password typed in the Tunnel tab is sent over the panel's HTTPS; with the default self-signed certificate make sure you really reached your own panel (check the certificate once) or use sshplus-tunnel-setup in the terminal. The tunnel's SSH key (/etc/SSHPlus/tunnel_key) gives this server root access to the exit server, so protect this server. The exit server's host key is trusted on first connection.
-	•	PermitRootLogin yes is enabled for compatibility. Consider using SSH keys for root and disabling password login for it.
-
-Uninstall
-
+```bash
 systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
 rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
-rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+```
 
-Tunnel users stay on the system; remove them with userdel USERNAME. Make sure you still have another way into the server (for example port 22) before deleting /etc/ssh/sshd_config.d/00-sshplus.conf.
+Accounts stay on the system; remove them with `userdel USERNAME`. Make sure you still have another way into the server (for example port 22) before deleting `/etc/ssh/sshd_config.d/00-sshplus.conf`.
 
-Disclaimer
+On the exit server (only if you did not remove the tunnel in the panel): `systemctl disable --now sshplus-exit; rm -f /usr/local/bin/sshplus-exit.sh /etc/systemd/system/sshplus-exit.service /etc/sshplus-exit.ports /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf`, then reload sshd.
 
+### Disclaimer
 Use this software only on servers you own or administer, and in accordance with the laws that apply to you. It is provided as-is, without warranty.
+
+---
 
 <div dir="rtl">
 
 <a name="فارسی"></a>
 
-فارسی
+## فارسی
 
-امکانات
+### امکانات
 
-	•	OpenSSH مستقیم (پیش‌فرض پورت‌های ۲۲ و ۲۲۲۲). پورت SSH اختصاصی خودت (مثلاً یک پورت اصلی دلخواه) که بیرون از پنل تنظیم کرده‌ای هرگز دست نمی‌خورد.
-	•	Dropbear با حداکثر ۶ پورت قابل تنظیم.
-	•	BadVPN UDPGW (پیش‌فرض 127.0.0.1:7300) برای عبور ترافیک UDP مثل بازی آنلاین، DNS و تماس از داخل تونل SSH.
-	•	BBR که خودکار نصب می‌شود و از پنل قابل روشن/خاموش شدن است.
-	•	پنل وب (پورت 2053):
-	•	ساخت، ویرایش و حذف کاربر
-	•	سهمیه‌ی حجم (GB)، تاریخ انقضا، محدودیت اتصال همزمان
-	•	نمایش زنده‌ی کاربران آنلاین و مصرف CPU / RAM / شبکه
-	•	تغییر پورت‌های SSH، Dropbear و BadVPN
-	•	روشن/خاموش کردن BBR
-	•	کپی سریع مشخصات اتصال هر کاربر
-	•	محدودیت تلاش ورود به پنل (۵ تلاش ناموفق در ۵ دقیقه).
-	•	تانل (نسخه ۱.۱.۰): تانل SSH با یک کلیک به یک سرور خروجی؛ هر اکانت یا مستقیم است یا تانل.
-	•	نسخه ۱.۵.۰: HTTPS و تغییر اجباری رمز در اولین ورود؛ بکاپ/بازیابی رمزنگاری‌شده؛ ذخیره‌ی رمزنگاری‌شده‌ی رمزها؛ ربات و هشدار تلگرام (از مسیر تانل هم)؛ قالب و ساخت دسته‌ای اکانت؛ صفحه‌ی اشتراک و QR برای هر اکانت؛ تب آمار (سلامت تانل، بار سرور، مصرف روزانه).
-	•	اجرای دوباره‌ی اسکریپت امن است: کاربران، پورت‌ها و تنظیمات موجود حفظ می‌شوند.
+**هسته**
+- OpenSSH مستقیم (پیش‌فرض پورت‌های ۲۲ و ۲۲۲۲). پورت SSH اختصاصی خودت که بیرون از پنل تنظیم کرده‌ای هرگز دست نمی‌خورد.
+- Dropbear با حداکثر ۶ پورت قابل تنظیم.
+- BadVPN UDPGW (پیش‌فرض `127.0.0.1:7300`) برای ترافیک UDP مثل بازی آنلاین، DNS و تماس از داخل تونل SSH.
+- BBR که خودکار نصب می‌شود و از پنل قابل روشن/خاموش شدن است.
 
-پیش‌نیازها
+**پنل وب (HTTPS، پورت ۲۰۵۳)**
+- ساخت، ویرایش و حذف اکانت؛ سهمیه‌ی حجم (GB)، تاریخ انقضا، محدودیت اتصال همزمان.
+- **قالب** و **ساخت دسته‌ای** اکانت (۱ تا ۲۰۰ اکانت، رمز تصادفی یا مشترک، خروجی CSV).
+- **صفحه‌ی اشتراک و QR** برای هر اکانت.
+- نمایش زنده‌ی کاربران آنلاین و مصرف CPU / RAM / شبکه، **تب آمار** (سلامت تانل، بار سرور، مصرف روزانه، پرمصرف‌ترین‌ها).
+- تغییر پورت‌های SSH، Dropbear و BadVPN، روشن/خاموش کردن BBR، کپی سریع مشخصات اتصال.
 
-	•	اوبونتو ۲۲.۰۴ یا ۲۴.۰۴ (ترجیحاً سرور تازه)
-	•	دسترسی root
-	•	اینترنت (بسته‌ها و BadVPN هنگام نصب دانلود و کامپایل می‌شوند)
+**تانل (دو سرور)**
+- تانل SSH با یک کلیک به یک سرور دوم («خروجی»).
+- برای هر اکانت **In** (کاربر به کدام سرور وصل شود) و **Out** (با IP کدام سرور خارج شود) را انتخاب می‌کنی: `۱←۱`، `۱←۲`، `۲←۱`، `۲←۲`.
+- UDPGW روی هر چهار ترکیب کار می‌کند؛ با قطع تانل مسیر بسته می‌شود (fail-closed)؛ اتصال مجدد خودکار است.
+- تشخیص و رفع تداخل پورت روی هر دو سرور و به‌روزرسانی فایروال (ufw / firewalld) هر دو.
 
-نصب
+**امنیت و عملیات**
+- HTTPS با گواهی self-signed خودکار (گواهی خودت را در تنظیمات می‌گذاری)، تغییر اجباری رمز پیش‌فرض در اولین ورود، محدودیت تلاش ورود (۵ تلاش ناموفق در ۵ دقیقه).
+- رمزهایی که پنل نشان می‌دهد در حالت ذخیره رمزنگاری می‌شوند.
+- بکاپ و بازیابی رمزنگاری‌شده.
+- ربات تلگرام: هشدار و بکاپ روزانه.
+- اجرای دوباره‌ی اسکریپت امن است: کاربران، پورت‌ها، تانل و تنظیمات حفظ می‌شوند.
 
+### پیش‌نیازها
+- اوبونتو ۲۲.۰۴ یا ۲۴.۰۴ (ترجیحاً سرور تازه) و دسترسی root.
+- اینترنت (بسته‌ها و BadVPN هنگام نصب دانلود و کامپایل می‌شوند).
+- برای تانل: یک سرور لینوکس دوم (دبیان/اوبونتو با systemd) که root آن **فقط یک بار** هنگام نصب با رمز وارد شود.
+
+### نصب
+
+```bash
 bash <(curl -Ls https://raw.githubusercontent.com/Sinakhani70/sshplus-panel/main/install.sh)
+```
 
-اگر curl نصب نبود:
+اگر curl نصب نبود: `apt-get update && apt-get install -y curl`
 
-apt-get update && apt-get install -y curl
+دستور را **فقط روی سرور پنل** («سرور ۱») اجرا کن. سرور خروجی را خودِ پنل از طریق SSH تنظیم می‌کند؛ آنجا هرگز نصب‌کننده را اجرا نکن.
 
 در پایان نصب باید خروجی‌ای شبیه این ببینی:
 
+```
 Panel:     active
-Dropbear:  active
-BadVPN:    active
+Dropbear:  active   (tunnel instance: active)
+Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)
+BadVPN:    active   (tunnel instance: active)
 SSH:       active
 BBR:       bbr / fq
-Panel URL: http://YOUR_SERVER_IP:2053  (admin / admin)
+Version:   1.5.1
+Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must change it)
+```
 
-بعد از نصب
+### بعد از نصب
+۱. آدرس `https://IP_SERVER:2053` را باز کن. گواهی پیش‌فرض self-signed است و مرورگر یک بار هشدار می‌دهد؛ ادامه بده. (آدرس قدیمی `http://` خودکار به `https://` می‌رود.)
+۲. با `admin` / `admin` وارد شو. پنل رمز جدید (حداقل ۸ کاراکتر) می‌خواهد و تا آن موقع قفل می‌ماند.
+۳. یک اکانت بساز. در کلاینت SSH با IP سرور و یکی از پورت‌های Dropbear یا SSH که در پنل نمایش داده می‌شود وصل شو.
+۴. آدرس UDPGW را در کلاینت `127.0.0.1:7300` بگذار.
+۵. تنظیمات ← **بکاپ**: یک بکاپ بگیر و پسفریز را جای امن نگه دار. اگر خواستی تلگرام را وصل کن (پایین‌تر).
 
-۱. آدرس http://IP_SERVER:2053 را در مرورگر باز کن.
-۲. با admin / admin وارد شو و همان لحظه رمز را عوض کن (تب تنظیمات).
-۳. یک کاربر بساز.
-۴. در کلاینت SSH با IP سرور و یکی از پورت‌های Dropbear یا SSH که در پنل نمایش داده می‌شود وصل شو.
-۵. آدرس UDPGW را در کلاینت 127.0.0.1:7300 بگذار (یا پورتی که در پنل انتخاب کرده‌ای).
+نسخه‌ی نصب‌شده کنار لوگو نمایش داده می‌شود.
 
-دستورات کاربردی
+### آپدیت
+همان دستور نصب را دوباره روی سرور ۱ اجرا کن. کاربران، پورت‌ها، تانل، رمزها و تنظیمات حفظ می‌شوند. چند ثانیه بعد از بالا آمدن پنل، سمت سرور خروجی را خودش دوباره اعمال می‌کند. بعد از آپدیت از نسخه‌های قدیمی‌تر از ۱.۵، آدرس پنل `https://` است.
 
-# تغییر نام کاربری و رمز ادمین پنل از ترمینال
+### تانل
+
+کاربران به این سرور (سرور ۱) وصل می‌شوند. سرور خروجی (سرور ۲) فقط برای ترافیکی است که از آن عبور می‌دهی.
+
+**راه‌اندازی** — پنل ← تب **تانل** ← IP، پورت SSH و رمز root سرور خروجی ← **نصب و برقراری تانل**. با یک کلیک ورود با کلید SSH نصب، سرور خروجی آماده (`PermitTunnel`، فوروارد IP، NAT، فایروال) و تانل لایه‌ی ۳ روی SSH (`ssh -w`، کارت `tun99`، شبکه‌ی `10.99.0.0/30`) برقرار می‌شود. رمز فقط یک بار استفاده می‌شود و ذخیره نمی‌شود. روش ترمینالی (چیزی داخل صفحه‌ی وب تایپ نمی‌شود): `sshplus-tunnel-setup EXIT_IP [PORT] [USER]`.
+
+**In / Out برای هر اکانت** — موقع ساخت یا ویرایش اکانت:
+
+| In | Out | معنی |
+|----|-----|------|
+| سرور ۱ | سرور ۱ | اکانت «مستقیم» معمولی |
+| سرور ۱ | سرور ۲ | اکانت «تانل»: کاربر به سرور ۱ وصل می‌شود و با IP سرور ۲ خارج می‌شود |
+| سرور ۲ | سرور ۱ | کاربر به IP سرور ۲ وصل می‌شود و با IP سرور ۱ خارج می‌شود |
+| سرور ۲ | سرور ۲ | کاربر به IP سرور ۲ وصل می‌شود و با همان IP هم خارج می‌شود |
+
+- اکانت‌های Out = سرور ۲ روی پورت‌های OpenSSH و پورت‌های اختصاصی **Dropbear تانل** (پیش‌فرض ۲۰۸۷ و ۲۰۹۶) کار می‌کنند؛ پورت‌های Dropbear معمولی فقط اکانت‌های Out = سرور ۱ را می‌پذیرند.
+- In = سرور ۲: پورت‌های این سرور روی سرور خروجی منتشر و از داخل تانل فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور خروجی خودش رویش گوش می‌دهد هرگز دست نمی‌خورد، پس دسترسی ادمین به هر دو سرور باز می‌ماند. ورود از سرور ۲ «منتشر» می‌شود، نه اجباری (همان اکانت می‌تواند مستقیم به سرور ۱ هم وصل شود)؛ سمت Out اجباری است.
+- **Fail-closed:** اگر تانل قطع شود، هر مسیری که از آن می‌گذرد بسته می‌شود، نه اینکه با IP اشتباه خارج شود (IPv6 برای اکانت‌های تانل بسته است). تانل خودکار دوباره وصل می‌شود.
+- **UDPGW** (بازی/تماس) روی همه‌ی ترکیب‌ها کار می‌کند؛ برای Out = سرور ۲ یک نمونه‌ی دوم badvpn (پورت UDPGW به‌علاوه‌ی ۱) در مسیر تانل اجرا می‌شود و اتصال به `127.0.0.1:7300` شفاف به آن هدایت می‌شود؛ پس تنظیم کلاینت عوض نمی‌شود.
+
+**هماهنگی پورت‌ها و فایروال** — نصب‌کننده و پنل هیچ‌وقت پورتی را که برنامه‌ی دیگری (nginx، x-ui، …) رویش گوش می‌دهد انتخاب نمی‌کنند؛ پورت تنظیم‌شده‌ای که بعداً گرفته شود با پورت آزاد عوض می‌شود. روی سرور خروجی پورت مشغول با شماره‌ی دیگری منتشر می‌شود (مثلاً ۴۴۲ ← ۱۰۴۴۲) تا پورت‌های این سرور و کانفیگ کلاینت‌ها تغییر نکند. ufw / firewalld **هر دو** سرور به‌روز می‌شود. تب تانل جدول پورت‌ها و دکمه‌ی **بررسی و رفع تداخل** دارد؛ این بررسی با هر راه‌اندازی پنل، نصب تانل و تغییر پورت هم انجام می‌شود. فایروال خودِ ارائه‌دهنده‌ی VPS (security group) را باید خودت برای پورت‌های منتشرشده باز کنی.
+
+**محدودیت‌ها** — تانل فقط IPv4 است و روی TCP/SSH اجرا می‌شود (BBR را روی هر دو سرور روشن نگه دار)؛ فعلاً یک سرور خروجی؛ کاربری که از سرور ۲ وارد می‌شود، روی سرور ۱ با آدرس سرور خروجی دیده می‌شود.
+
+### امکانات پنل
+
+**صفحه‌ی اشتراک و QR** — هر اکانت یک لینک مخصوص `https://HOST:2053/s/<token>` دارد (دکمه‌ی 🔗 در لیست): صفحه‌ای بدون نیاز به ورود با انقضا، مصرف، اطلاعات اتصال (مطابق In/Out و نگاشت پورت)، لینک `ssh://` و QR. توکن غلط برای هر IP محدودیت تعداد دارد.
+
+**قالب و ساخت دسته‌ای** — فرم ساخت اکانت را به‌عنوان قالب ذخیره و بعداً اعمال کن. *ساخت دسته‌ای*: پیشوند + تعداد (۱ تا ۲۰۰) + روز/حجم/همزمان/In/Out؛ رمز تصادفی (یا یک رمز مشترک)؛ نتیجه قابل کپی و دانلود CSV است؛ تداخل نام برای هر اکانت جداگانه گزارش می‌شود.
+
+**تب آمار** — هر دقیقه وضعیت و تأخیر تانل، CPU/RAM و مصرف هر کاربر ثبت می‌شود: دسترس‌پذیری تانل (۲۴ ساعت)، بار سرور (۲۴ ساعت)، مصرف روزانه (۱۴ روز) و پرمصرف‌ترین کاربران (۷ روز).
+
+**بکاپ و بازیابی** — تنظیمات ← بکاپ. یک فایل شامل کاربران (با hash رمز و انقضا)، حجم/مصرف، پورت‌ها، تنظیمات تانل و کلید SSH آن، تنظیمات تلگرام، قالب‌ها و تاریخچه، رمزنگاری‌شده با پسفریزی که خودت می‌گذاری. بازیابی اکانت‌های لینوکسیِ ناموجود را دوباره می‌سازد، تانل را دوباره اعمال می‌کند و پنل را ری‌استارت می‌کند. بدون پسفریز فایل باز نمی‌شود.
+
+**تلگرام** — تنظیمات ← تلگرام:
+۱. با `@BotFather` یک ربات بساز و توکن را بگذار.
+۲. به ربات `/start` بده، «پیدا کردن Chat ID» را بزن و ذخیره کن.
+۳. هشدارها را انتخاب کن: قطع/وصل تانل، ۹۰٪ و پر شدن حجم، نزدیک/پایان انقضا (۳ روز)، فشار CPU/RAM به مدت ۳ دقیقه (هر هشدار فقط یک بار می‌آید)، بکاپ روزانه‌ی رمزنگاری‌شده (پسفریز بکاپ و ساعت لازم است).
+۴. دستورهای ربات (فقط از Chat ID تنظیم‌شده): `/status`، `/users`، `/online`، `/backup`.
+
+اگر تلگرام از روی سرور باز نشود (معمولاً فیلتر است)، پنل خودکار از مسیر تانل می‌فرستد و مسیر موفق را به خاطر می‌سپارد.
+
+**HTTPS** — تنظیمات ← HTTPS گواهی فعلی را نشان می‌دهد. برای گواهی معتبر (مثلاً Let's Encrypt اگر دامنه داری) زنجیره‌ی کامل و کلید خصوصی را همان‌جا بچسبان؛ قبل از فعال شدن بررسی می‌شوند.
+
+### دستورات کاربردی
+
+```bash
+# تغییر نام کاربری و رمز ادمین پنل از ترمینال (راه برگشت اگر رمز را فراموش کردی)
 sshplus-pass NEWUSER NEWPASSWORD
 
 # نصب/تعویض تانل از ترمینال
 sshplus-tunnel-setup EXIT_IP [PORT] [USER]
 
 # وضعیت سرویس‌ها
-systemctl status sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel badvpn
+systemctl status sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel badvpn badvpn-t
 
 # لاگ‌ها
 journalctl -u sshplus-dropbear -n 50 --no-pager
+journalctl -u sshplus-tunnel -n 50 --no-pager
 tail -50 /var/log/sshplus/install.log
 
 # پورت‌های در حال گوش دادن
@@ -199,50 +332,50 @@ ss -tlnp | grep -E 'dropbear|badvpn|sshd'
 
 # بررسی BBR
 sysctl net.ipv4.tcp_congestion_control
+```
 
-مسیر فایل‌ها
+### مسیر فایل‌ها
 
-مسیر	کاربرد
-/opt/sshplus-panel/	پنل (app.py و index.html)
-/etc/SSHPlus/	تنظیمات (panel.json، ports.json، badvpn.conf، meta.json، tunnel.conf، tunnel_key)
-/etc/ssh/sshd_config.d/00-sshplus.conf	تنظیمات OpenSSH که پنل مدیریت می‌کند
-/var/log/sshplus/install.log	لاگ نصب
+| مسیر | کاربرد |
+|------|--------|
+| `/opt/sshplus-panel/` | پنل (`app.py` و `index.html`) |
+| `/etc/SSHPlus/panel.json` | ورود و پورت پنل |
+| `/etc/SSHPlus/ports.json` و `badvpn.conf` | پورت‌های SSH / Dropbear / Dropbear تانل و تنظیمات UDPGW |
+| `/etc/SSHPlus/meta.json` | اطلاعات هر اکانت (رمز رمزنگاری‌شده، حجم، مصرف، توکن اشتراک) |
+| `/etc/SSHPlus/secret.key` | کلید مقادیر رمزنگاری‌شده (فقط root) |
+| `/etc/SSHPlus/panel.crt` و `panel.key` | گواهی HTTPS |
+| `/etc/SSHPlus/tunnel.conf` و `tunnel_key` و `tunnel_known_hosts` | تنظیمات تانل و کلید SSH آن |
+| `/etc/SSHPlus/telegram.json` و `templates.json` و `history.json` | تنظیمات تلگرام، قالب‌ها، آمار |
+| `/etc/ssh/sshd_config.d/00-sshplus.conf` | تنظیمات OpenSSH که پنل مدیریت می‌کند |
+| `/var/log/sshplus/install.log` | لاگ نصب |
 
-تانل (جدید در نسخه ۱.۱.۰)
+### نکات امنیتی
+- پنل روی پورت ۲۰۵۳ با HTTPS بالا می‌آید (گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد؛ در تنظیمات گواهی خودت را بگذار). رمز پیش‌فرض `admin/admin` در اولین ورود باید عوض شود و تا آن موقع پنل قفل است.
+- رمزهایی که پنل نمایش می‌دهد در `meta.json` رمزنگاری‌شده (Fernet) ذخیره می‌شوند. کلید `/etc/SSHPlus/secret.key` روی همین سرور است (فقط root)، پس از فایل کپی‌شده و بکاپ محافظت می‌کند، **نه** از دسترسی root. رمز واقعی اکانت‌ها مثل همیشه فقط به‌صورت hash در `/etc/shadow` است.
+- بکاپ شامل کلید خصوصی تانل و hash رمزهاست؛ رمزنگاری‌شده است ولی فایل و پسفریز را جدا از هم نگه دار.
+- شمارش ترافیک تقریبی است (بر پایه‌ی شمارنده‌های I/O هر پروسه) و برای صورتحساب دقیق قابل اتکا نیست.
+- با تغییر پورت از پنل، اتصال‌های فعال Dropbear لحظه‌ای قطع می‌شوند.
+- تانل: رمز سرور خروجی که در تب تانل وارد می‌کنی از طریق HTTPS پنل می‌رود؛ با گواهی self-signed مطمئن شو واقعاً به پنل خودت وصل شده‌ای (یک بار گواهی را بررسی کن) یا از `sshplus-tunnel-setup` استفاده کن. کلید SSH تانل به سرور ۱ دسترسی root روی سرور خروجی می‌دهد؛ پس از سرور ۱ محافظت کن. کلید هاست سرور خروجی در اولین اتصال پذیرفته می‌شود.
+- برای سازگاری `PermitRootLogin yes` فعال است. بهتر است برای root از کلید SSH استفاده کنی و ورود با رمز را ببندی.
 
-اکانت‌های انتخابی را از طریق یک سرور دوم («خروجی») به اینترنت وصل کن. کاربران همچنان به همین سرور وصل می‌شوند: اکانت «تانل» با IP سرور خروجی و اکانت «مستقیم» با IP همین سرور به اینترنت می‌رسد.
+### حذف
 
-	•	پنل ← تب «تانل» ← IP، پورت SSH و رمز root سرور خروجی را بده ← «نصب و برقراری تانل». با یک کلیک روی هر دو سرور انجام می‌شود: نصب ورود با کلید SSH، آماده‌سازی سرور خروجی (PermitTunnel، فوروارد IP، NAT) و برقراری تانل لایه‌ی ۳ روی SSH (ssh -w، کارت tun99، شبکه‌ی 10.99.0.0/30). رمز فقط یک بار استفاده می‌شود و ذخیره نمی‌شود.
-	•	روش ترمینالی (رمز از مسیر پنل رد نمی‌شود): sshplus-tunnel-setup EXIT_IP [PORT] [USER]
-	•	ساخت کاربر ← «نوع اکانت»: مستقیم (Direct) یا تانل (Tunnel). بعداً هم در ویرایش کاربر قابل تغییر است.
-	•	اکانت تانل روی پورت‌های OpenSSH و پورت‌های اختصاصی «Dropbear تانل» (پیش‌فرض ۲۰۸۷ و ۲۰۹۶؛ از تب تنظیمات قابل تغییر) کار می‌کند. پورت‌های Dropbear معمولی فقط اکانت مستقیم می‌پذیرند و پورت‌های Dropbear تانل فقط اکانت تانل.
-	•	Fail-closed: اگر تانل قطع شود، اکانت‌های تانل اصلاً اینترنت ندارند (هرگز با IP همین سرور نشت نمی‌کنند). تانل خودکار دوباره وصل می‌شود.
-	•	دوطرفه از پایه (نسخه ۱.۳.۰): در تب تانل چیزی برای تنظیم نیست. موقع ساخت یا ویرایش اکانت، «In» (کاربر به کدام سرور وصل شود؛ سرور ۱ = همین سرور، سرور ۲ = سرور خروجی) و «Out» (با IP کدام سرور خارج شود) را انتخاب می‌کنی. هر چهار ترکیب کار می‌کند: ۱←۱ (مستقیم)، ۱←۲ (تانل)، ۲←۱ و ۲←۲. برای «In = سرور ۲»، سرور دوم پورت‌های همین سرور را از داخل تانل فوروارد می‌کند؛ پورت ۲۲ و هر پورتی که سرور دوم خودش رویش گوش می‌دهد هرگز دست نمی‌خورد، پس دسترسی ادمین به هر دو سرور و پنل باز می‌ماند. فایروال سرور دوم باید پورت‌های فوروارد‌شده را باز کند؛ وقتی کاربر از سرور ۲ وارد می‌شود IP واقعی‌اش روی این سرور دیده نمی‌شود.
-	•	UDPGW (بازی/تماس) روی هر چهار ترکیب In/Out کار می‌کند. برای «Out = سرور ۲» از داخل تانل می‌گذرد: یک نمونه‌ی دوم badvpn روی پورت UDPGW به‌علاوه‌ی ۱ در مسیر تانل اجرا می‌شود و اتصال به 127.0.0.1:7300 شفاف به آن هدایت می‌شود؛ پس تنظیم کلاینت عوض نمی‌شود.
-	•	هماهنگی پورت‌ها و فایروال (نسخه ۱.۴.۰): نصب‌کننده و پنل پورت‌های Dropbear را که برنامه‌ی دیگری رویشان گوش می‌دهد رد یا عوض می‌کنند؛ پورتی که روی سرور خروجی مشغول است با شماره‌ی دیگری منتشر می‌شود (مثلاً ۴۴۲ ← ۱۰۴۴۲) و حذف نمی‌شود، پس پورت‌های همین سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کند. قوانین ufw/firewalld هر دو سرور برای پورت‌ها به‌روز می‌شود. تب تانل جدول پورت‌ها و دکمه‌ی «بررسی و رفع تداخل» دارد؛ این بررسی با هر راه‌اندازی پنل، نصب تانل و تغییر پورت هم خودکار انجام می‌شود.
-	•	محدودیت‌ها: تانل فقط IPv4 است (IPv6 برای اکانت تانل بسته است)؛ تانل روی TCP/SSH است پس BBR را روی هر دو سرور روشن نگه دار؛ فعلاً یک سرور خروجی؛ سرور خروجی باید لینوکس با systemd باشد و برای نصب یک‌باره ورود root با رمز را بپذیرد؛ به cgroup v2 نیاز دارد (اوبونتو ۲۲.۰۴/۲۴.۰۴).
-نکات امنیتی
+اول تانل را در پنل حذف کن (پورت‌های فوروارد‌شده را هم از سرور خروجی برمی‌دارد)، بعد:
 
-	•	پنل روی پورت ۲۰۵۳ با HTTPS بالا می‌آید (گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد؛ در تنظیمات می‌توانی گواهی خودت را بگذاری؛ آدرس http قدیمی خودکار به https می‌رود). رمز پیش‌فرض admin/admin در اولین ورود باید عوض شود و تا آن موقع پنل قفل است.
-	•	رمزهایی که پنل نمایش می‌دهد در حالت ذخیره رمزنگاری می‌شوند (Fernet) در /etc/SSHPlus/meta.json؛ کلید /etc/SSHPlus/secret.key روی همین سرور است (فقط root)، پس از نسخه‌ی کپی‌شده‌ی فایل و بکاپ محافظت می‌کند، نه از دسترسی root. رمز واقعی اکانت‌ها مثل همیشه فقط به‌صورت hash در /etc/shadow است.
-	•	شمارش ترافیک تقریبی است (بر پایه‌ی شمارنده‌های I/O هر پروسه) و برای صورتحساب دقیق قابل اتکا نیست.
-	•	با تغییر پورت از پنل، اتصال‌های فعال Dropbear لحظه‌ای قطع می‌شوند.
-	•	تانل: رمز سرور خروجی که در تب تانل وارد می‌کنی از طریق HTTPS پنل می‌رود؛ با گواهی self-signed پیش‌فرض مطمئن شو واقعاً به پنل خودت وصل شده‌ای (یک بار گواهی را بررسی کن) یا در ترمینال از sshplus-tunnel-setup استفاده کن. کلید SSH تانل (/etc/SSHPlus/tunnel_key) به این سرور دسترسی root روی سرور خروجی می‌دهد؛ پس از این سرور محافظت کن. کلید هاست سرور خروجی در اولین اتصال پذیرفته می‌شود.
-	•	برای سازگاری، PermitRootLogin yes فعال است. بهتر است برای root از کلید SSH استفاده کنی و ورود با رمز را ببندی.
-
-حذف
-
+```bash
 systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
 rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
-rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+```
 
-کاربران تونل روی سیستم می‌مانند؛ با userdel USERNAME پاکشان کن. قبل از حذف /etc/ssh/sshd_config.d/00-sshplus.conf مطمئن شو راه دیگری برای ورود به سرور داری (مثلاً پورت ۲۲).
+اکانت‌ها روی سیستم می‌مانند؛ با `userdel USERNAME` پاکشان کن. قبل از حذف `/etc/ssh/sshd_config.d/00-sshplus.conf` مطمئن شو راه دیگری برای ورود به سرور داری (مثلاً پورت ۲۲).
 
-سلب مسئولیت
+روی سرور خروجی (فقط اگر تانل را در پنل حذف نکردی): `systemctl disable --now sshplus-exit; rm -f /usr/local/bin/sshplus-exit.sh /etc/systemd/system/sshplus-exit.service /etc/sshplus-exit.ports /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf` و بعد sshd را reload کن.
 
+### سلب مسئولیت
 این نرم‌افزار را فقط روی سرورهایی که مالک یا مدیر آن‌ها هستی و مطابق قوانین کشور خودت استفاده کن. نرم‌افزار «همان‌طور که هست» و بدون هیچ ضمانتی ارائه می‌شود.
 
 </div>
