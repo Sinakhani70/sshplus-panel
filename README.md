@@ -23,6 +23,7 @@ Features
 	•	one-click copy of a user's connection info
 	•	Login rate limit on the panel (5 failed attempts per 5 minutes).
 	•	Tunnel (v1.1.0): one-click SSH tunnel to a second exit server; each account is either Direct or Tunnel.
+	•	v1.5.0: HTTPS + forced first-login password change; encrypted backup/restore; encrypted password storage; Telegram bot and alerts (also through the tunnel); account templates and bulk creation; per-account subscription page with QR; statistics tab (tunnel health, load, daily traffic).
 	•	Safe to re-run: existing users, ports and settings are kept.
 
 Requirements
@@ -101,11 +102,11 @@ Send selected accounts out through a second "exit" server. Users still connect t
 
 Security notes
 
-	•	The panel runs over plain HTTP with default login admin/admin. Change the password right away. For better protection, restrict port 2053 with a firewall or access it through an SSH tunnel.
-	•	User passwords are stored in plain text in /etc/SSHPlus/meta.json (root-only, mode 600) so the panel can display them.
+	•	The panel is served over HTTPS on port 2053 (self-signed certificate by default, so the browser warns; upload your own in Settings; plain http:// is redirected to https://). The default login admin/admin must be changed at the first login, the panel is locked until then.
+	•	User passwords shown in the panel are encrypted at rest (Fernet) in /etc/SSHPlus/meta.json; the key /etc/SSHPlus/secret.key lives on the same server (root-only), so this protects copies of the file and backups, not a compromised root. The real account passwords are only hashes in /etc/shadow, as usual.
 	•	Traffic accounting is approximate (based on per-process I/O counters); do not rely on it for exact billing.
 	•	Dropbear connections are briefly dropped when ports are changed from the panel.
-	•	Tunnel: the panel is plain HTTP, so the exit server's password typed in the Tunnel tab travels unencrypted unless you reach the panel through an SSH tunnel; use sshplus-tunnel-setup in the terminal instead if in doubt. The tunnel's SSH key (/etc/SSHPlus/tunnel_key) gives this server root access to the exit server, so protect this server. The exit server's host key is trusted on first connection.
+	•	Tunnel: the exit server's password typed in the Tunnel tab is sent over the panel's HTTPS; with the default self-signed certificate make sure you really reached your own panel (check the certificate once) or use sshplus-tunnel-setup in the terminal. The tunnel's SSH key (/etc/SSHPlus/tunnel_key) gives this server root access to the exit server, so protect this server. The exit server's host key is trusted on first connection.
 	•	PermitRootLogin yes is enabled for compatibility. Consider using SSH keys for root and disabling password login for it.
 
 Uninstall
@@ -144,6 +145,7 @@ Use this software only on servers you own or administer, and in accordance with 
 	•	کپی سریع مشخصات اتصال هر کاربر
 	•	محدودیت تلاش ورود به پنل (۵ تلاش ناموفق در ۵ دقیقه).
 	•	تانل (نسخه ۱.۱.۰): تانل SSH با یک کلیک به یک سرور خروجی؛ هر اکانت یا مستقیم است یا تانل.
+	•	نسخه ۱.۵.۰: HTTPS و تغییر اجباری رمز در اولین ورود؛ بکاپ/بازیابی رمزنگاری‌شده؛ ذخیره‌ی رمزنگاری‌شده‌ی رمزها؛ ربات و هشدار تلگرام (از مسیر تانل هم)؛ قالب و ساخت دسته‌ای اکانت؛ صفحه‌ی اشتراک و QR برای هر اکانت؛ تب آمار (سلامت تانل، بار سرور، مصرف روزانه).
 	•	اجرای دوباره‌ی اسکریپت امن است: کاربران، پورت‌ها و تنظیمات موجود حفظ می‌شوند.
 
 پیش‌نیازها
@@ -211,7 +213,7 @@ sysctl net.ipv4.tcp_congestion_control
 اکانت‌های انتخابی را از طریق یک سرور دوم («خروجی») به اینترنت وصل کن. کاربران همچنان به همین سرور وصل می‌شوند: اکانت «تانل» با IP سرور خروجی و اکانت «مستقیم» با IP همین سرور به اینترنت می‌رسد.
 
 	•	پنل ← تب «تانل» ← IP، پورت SSH و رمز root سرور خروجی را بده ← «نصب و برقراری تانل». با یک کلیک روی هر دو سرور انجام می‌شود: نصب ورود با کلید SSH، آماده‌سازی سرور خروجی (PermitTunnel، فوروارد IP، NAT) و برقراری تانل لایه‌ی ۳ روی SSH (ssh -w، کارت tun99، شبکه‌ی 10.99.0.0/30). رمز فقط یک بار استفاده می‌شود و ذخیره نمی‌شود.
-	•	روش ترمینالی (رمز از مسیر HTTP ساده‌ی پنل رد نمی‌شود): sshplus-tunnel-setup EXIT_IP [PORT] [USER]
+	•	روش ترمینالی (رمز از مسیر پنل رد نمی‌شود): sshplus-tunnel-setup EXIT_IP [PORT] [USER]
 	•	ساخت کاربر ← «نوع اکانت»: مستقیم (Direct) یا تانل (Tunnel). بعداً هم در ویرایش کاربر قابل تغییر است.
 	•	اکانت تانل روی پورت‌های OpenSSH و پورت‌های اختصاصی «Dropbear تانل» (پیش‌فرض ۲۰۸۷ و ۲۰۹۶؛ از تب تنظیمات قابل تغییر) کار می‌کند. پورت‌های Dropbear معمولی فقط اکانت مستقیم می‌پذیرند و پورت‌های Dropbear تانل فقط اکانت تانل.
 	•	Fail-closed: اگر تانل قطع شود، اکانت‌های تانل اصلاً اینترنت ندارند (هرگز با IP همین سرور نشت نمی‌کنند). تانل خودکار دوباره وصل می‌شود.
@@ -221,11 +223,11 @@ sysctl net.ipv4.tcp_congestion_control
 	•	محدودیت‌ها: تانل فقط IPv4 است (IPv6 برای اکانت تانل بسته است)؛ تانل روی TCP/SSH است پس BBR را روی هر دو سرور روشن نگه دار؛ فعلاً یک سرور خروجی؛ سرور خروجی باید لینوکس با systemd باشد و برای نصب یک‌باره ورود root با رمز را بپذیرد؛ به cgroup v2 نیاز دارد (اوبونتو ۲۲.۰۴/۲۴.۰۴).
 نکات امنیتی
 
-	•	پنل روی HTTP ساده و با رمز پیش‌فرض admin/admin بالا می‌آید. رمز را فوراً عوض کن. برای امنیت بیشتر، پورت 2053 را با فایروال محدود کن یا از طریق تونل SSH واردش شو.
-	•	رمز کاربران برای نمایش در پنل به‌صورت متن ساده در /etc/SSHPlus/meta.json ذخیره می‌شود (فقط root، دسترسی ۶۰۰).
+	•	پنل روی پورت ۲۰۵۳ با HTTPS بالا می‌آید (گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد؛ در تنظیمات می‌توانی گواهی خودت را بگذاری؛ آدرس http قدیمی خودکار به https می‌رود). رمز پیش‌فرض admin/admin در اولین ورود باید عوض شود و تا آن موقع پنل قفل است.
+	•	رمزهایی که پنل نمایش می‌دهد در حالت ذخیره رمزنگاری می‌شوند (Fernet) در /etc/SSHPlus/meta.json؛ کلید /etc/SSHPlus/secret.key روی همین سرور است (فقط root)، پس از نسخه‌ی کپی‌شده‌ی فایل و بکاپ محافظت می‌کند، نه از دسترسی root. رمز واقعی اکانت‌ها مثل همیشه فقط به‌صورت hash در /etc/shadow است.
 	•	شمارش ترافیک تقریبی است (بر پایه‌ی شمارنده‌های I/O هر پروسه) و برای صورتحساب دقیق قابل اتکا نیست.
 	•	با تغییر پورت از پنل، اتصال‌های فعال Dropbear لحظه‌ای قطع می‌شوند.
-	•	تانل: پنل روی HTTP ساده است و رمز سرور خروجی که در تب تانل وارد می‌کنی بدون رمزنگاری می‌رود، مگر اینکه از طریق تونل SSH به پنل وصل شده باشی؛ اگر شک داری در ترمینال از sshplus-tunnel-setup استفاده کن. کلید SSH تانل (/etc/SSHPlus/tunnel_key) به این سرور دسترسی root روی سرور خروجی می‌دهد؛ پس از این سرور محافظت کن. کلید هاست سرور خروجی در اولین اتصال پذیرفته می‌شود.
+	•	تانل: رمز سرور خروجی که در تب تانل وارد می‌کنی از طریق HTTPS پنل می‌رود؛ با گواهی self-signed پیش‌فرض مطمئن شو واقعاً به پنل خودت وصل شده‌ای (یک بار گواهی را بررسی کن) یا در ترمینال از sshplus-tunnel-setup استفاده کن. کلید SSH تانل (/etc/SSHPlus/tunnel_key) به این سرور دسترسی root روی سرور خروجی می‌دهد؛ پس از این سرور محافظت کن. کلید هاست سرور خروجی در اولین اتصال پذیرفته می‌شود.
 	•	برای سازگاری، PermitRootLogin yes فعال است. بهتر است برای root از کلید SSH استفاده کنی و ورود با رمز را ببندی.
 
 حذف

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.4.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.5.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
@@ -14,7 +14,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.4.0"
+VERSION="1.5.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -29,8 +29,8 @@ echo "== install $(date)" >> $LOG
 # 1) package index update (prerequisite)  2) curl  3) everything else
 apt-get update -y >>$LOG 2>&1 || echo "WARN: apt-get update ناموفق بود (لاگ: $LOG)"
 apt-get install -y curl >>$LOG 2>&1
-apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server openssh-client sshpass iptables iproute2 psmisc procps kmod >>$LOG 2>&1
-for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables; do
+apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server openssh-client sshpass openssl python3-cryptography python3-qrcode iptables iproute2 psmisc procps kmod >>$LOG 2>&1
+for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables openssl; do
   command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
 done
 
@@ -534,10 +534,10 @@ step3() {
 echo ">>> [3/4] Panel backend (app.py)"
 cat > /opt/sshplus-panel/app.py <<'PYEOF'
 #!/usr/bin/env python3
-import os, re, sys, json, time, shutil, getpass, secrets, threading, subprocess
+import os, re, io, sys, json, time, ssl, socket, base64, hashlib, shutil, getpass, secrets, threading, subprocess
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, quote
 
 CFG="/etc/SSHPlus/panel.json"; DB="/root/users.db"; META="/etc/SSHPlus/meta.json"
 PORTS="/etc/SSHPlus/ports.json"; BV="/etc/SSHPlus/badvpn.conf"
@@ -774,9 +774,9 @@ def get_users(om):
       es=(datetime(1970,1,1)+timedelta(days=int(ex))).strftime("%Y-%m-%d"); dl=max(0,int(ex)-today); expd=int(ex)<=today
     else: es="Never"; dl=0; expd=False
     m=meta.get(u,{}); q=float(m.get("q",0)); ub=int(m.get("u",0))
-    res.append({"u":u,"pw":m.get("pw",""),"lim":int(m.get("lim",lim.get(u,1))),"on":om.get(u,0),"exp":es,"dl":dl,
+    res.append({"u":u,"pw":dec(m.get("pw","")),"lim":int(m.get("lim",lim.get(u,1))),"on":om.get(u,0),"exp":es,"dl":dl,
                 "expd":expd,"q":q,"ugb":fmt_traffic(ub),"qfull":(q>0 and ub>=int(q*1073741824)),
-                "pt":str(m.get("pt","All")),"tm":"tunnel" if pm[u][1]==SHELL_T else "direct","en":"B" if m.get("en")=="B" else "A"})
+                "pt":str(m.get("pt","All")),"tm":"tunnel" if pm[u][1]==SHELL_T else "direct","en":"B" if m.get("en")=="B" else "A","st":m.get("tok","")})
   return res
 
 def refresh_lock(u):
@@ -824,7 +824,8 @@ def user_save(d):
     ls=read_limits_db(); ls[u]=lim; write_limits_db(ls)
     meta=rjson(META,{}); m=meta.setdefault(u,newm(lim))
     m["q"]=q; m["pt"]=pt; m["lim"]=lim; m["en"]=en
-    if pw: m["pw"]=pw
+    if pw: m["pw"]=enc(pw)
+    if not m.get("tok"): m["tok"]=secrets.token_hex(12)
     if d.get("rst"): m["u"]=0
     wjson(META,meta)
   refresh_lock(u)
@@ -1316,6 +1317,9 @@ def mon():
             cmd(["systemctl","reset-failed",srv]); cmd(["systemctl","restart",srv])
       n+=1
       if n==4: threading.Thread(target=ports_sync,daemon=True).start()     # once per panel start / update
+      if n%20==0:                                                          # every minute: history + Telegram alerts
+        try: alerts_tick(hist_tick())
+        except Exception: pass
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
       sessions,io_pids=on_map(True)
       um=user_uid_map(); sh=shadow_map(); lim=read_limits_db(); today=int(time.time()//86400)
@@ -1332,7 +1336,7 @@ def mon():
               cur=(io.get("rchar",0)+io.get("wchar",0))//2
             except Exception: continue
             prv=PIDS.get(pid,cur if STATE["first"] else 0); PIDS[pid]=cur
-            if cur>prv: m["u"]=int(m.get("u",0))+(cur-prv); ch=True
+            if cur>prv: m["u"]=int(m.get("u",0))+(cur-prv); DAYU[u]=DAYU.get(u,0)+(cur-prv); ch=True
         STATE["first"]=False
         for dead in [k for k in PIDS if k not in active]: PIDS.pop(dead,None)
         for u in um:
@@ -1352,9 +1356,455 @@ def mon():
     except Exception: pass
     time.sleep(3)
 
+# ---------- v1.5: secrets at rest, TLS, backup, Telegram, templates/bulk, subscription links, history ----------
+try:
+  from cryptography.fernet import Fernet, InvalidToken
+  HAVE_FERNET=True
+except Exception: HAVE_FERNET=False
+try:
+  import qrcode, qrcode.image.svg
+  HAVE_QR=True
+except Exception: HAVE_QR=False
+
+SECRETK="/etc/SSHPlus/secret.key"; CERT="/etc/SSHPlus/panel.crt"; CKEY="/etc/SSHPlus/panel.key"
+TGC="/etc/SSHPlus/telegram.json"; TGS="/etc/SSHPlus/tg_state.json"; TPL="/etc/SSHPlus/templates.json"; HIST="/etc/SSHPlus/history.json"
+VERSION="__VERSION__"
+SRV=[None]; _FER=[None]; DAYU={}; TG={"off":0,"tun":None,"cpu":0,"mem":0,"tdown":0,"via":"direct"}
+PWCH="abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+# ---- 3) user passwords are encrypted at rest (key in a separate root-only file)
+def fer():
+  if not HAVE_FERNET: return None
+  if _FER[0] is None:
+    try: k=open(SECRETK,"rb").read().strip()
+    except Exception:
+      k=Fernet.generate_key(); fd=os.open(SECRETK,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,k); os.close(fd)
+    _FER[0]=Fernet(k)
+  return _FER[0]
+
+def enc(s):
+  f=fer(); s=str(s or "")
+  return ("enc:"+f.encrypt(s.encode()).decode()) if (f and s) else s
+
+def dec(s):
+  s=str(s or "")
+  if not s.startswith("enc:"): return s
+  f=fer()
+  try: return f.decrypt(s[4:].encode()).decode() if f else ""
+  except Exception: return ""
+
+def migrate_secrets():
+  if not fer(): return
+  with ML:
+    meta=rjson(META,{}); ch=False
+    for u,m in meta.items():
+      v=m.get("pw","")
+      if v and not str(v).startswith("enc:"): m["pw"]=enc(v); ch=True
+      if not m.get("tok"): m["tok"]=secrets.token_hex(12); ch=True
+    if ch: wjson(META,meta)
+  t=rjson(TGC,{}); ch=False
+  for k in ("token","bpass"):
+    if t.get(k) and not str(t[k]).startswith("enc:"): t[k]=enc(t[k]); ch=True
+  if ch: wjson(TGC,t)
+
+# ---- 1) HTTPS (self-signed by default, own certificate can be uploaded) + forced password change
+def ensure_cert():
+  if os.path.exists(CERT) and os.path.exists(CKEY): return True
+  cmd(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","3650","-subj","/CN=CK.VPN","-keyout",CKEY,"-out",CERT],90)
+  try: os.chmod(CKEY,0o600)
+  except Exception: pass
+  return os.path.exists(CERT) and os.path.exists(CKEY)
+
+def tls_ctx(cert=CERT,key=CKEY):
+  c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.minimum_version=ssl.TLSVersion.TLSv1_2; c.load_cert_chain(cert,key); return c
+
+def cert_info():
+  rc,o,_=cmd(["openssl","x509","-in",CERT,"-noout","-subject","-enddate","-issuer"])
+  return o if rc==0 else ""
+
+def cert_save(d):
+  cp=str(d.get("cert","")).strip()+"\n"; kp=str(d.get("key","")).strip()+"\n"
+  if len(cp)>40000 or len(kp)>40000 or "BEGIN" not in cp or "PRIVATE KEY" not in kp: return 400,{"ok":0,"msg":"Invalid PEM (need certificate chain + private key)"}
+  t1=CERT+".new"; t2=CKEY+".new"
+  try:
+    for f,v in ((t1,cp),(t2,kp)):
+      fd=os.open(f,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,v.encode()); os.close(fd)
+    ctx=tls_ctx(t1,t2)                         # raises if the key does not match the certificate
+  except Exception as e:
+    for f in (t1,t2):
+      try: os.remove(f)
+      except OSError: pass
+    return 400,{"ok":0,"msg":"Certificate/key rejected: "+str(e)[:100]}
+  os.replace(t1,CERT); os.replace(t2,CKEY)
+  if SRV[0] is not None: SRV[0].ctx=ctx
+  return 200,{"ok":1}
+
+def must_change():
+  return str(rjson(CFG,{"password":"admin"}).get("password","admin")).strip()=="admin"
+
+# ---- 2) encrypted backup / restore
+BK_MAGIC=b"CKBK1"
+BK_FILES=[CFG,PORTS,BV,META,TCONF,TKEY,TKEY+".pub",TKH,SECRETK,DB,TGC,TPL,HIST,CERT,CKEY]
+
+def bk_key(pw,salt): return base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256",pw.encode(),salt,200000,32))
+
+def make_backup(pw):
+  if not HAVE_FERNET: raise Exception("python3-cryptography is not installed")
+  files={}
+  for f in BK_FILES:
+    try: files[f]=base64.b64encode(open(f,"rb").read()).decode()
+    except Exception: pass
+  sh=shadow_map(); users=[]
+  for u,(uid,shl) in passwd_map().items():
+    h,ex=sh.get(u,("",""))
+    users.append({"u":u,"sh":shl,"h":h,"ex":ex})
+  raw=json.dumps({"ver":VERSION,"ts":int(time.time()),"files":files,"users":users}).encode()
+  salt=os.urandom(16)
+  return BK_MAGIC+salt+Fernet(bk_key(pw,salt)).encrypt(raw)
+
+def restore_backup(raw,pw):
+  if not HAVE_FERNET: return 500,{"ok":0,"msg":"python3-cryptography is not installed"}
+  if not raw.startswith(BK_MAGIC) or len(raw)<40: return 400,{"ok":0,"msg":"Not a CK.VPN backup file"}
+  try: d=json.loads(Fernet(bk_key(pw,raw[5:21])).decrypt(raw[21:]))
+  except InvalidToken: return 400,{"ok":0,"msg":"Wrong passphrase or damaged file"}
+  except Exception: return 400,{"ok":0,"msg":"Backup could not be read"}
+  allowed=set(BK_FILES)
+  for path,b in d.get("files",{}).items():
+    if path not in allowed: continue
+    t=path+".r"; fd=os.open(t,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,base64.b64decode(b)); os.close(fd); os.replace(t,path)
+  _FER[0]=None
+  n=0
+  for x in d.get("users",[]):
+    u=str(x.get("u","")); shl=x.get("sh") if x.get("sh") in (SHELL,SHELL_T) else SHELL
+    if not NAME_RE.match(u) or u in ("root","admin","ubuntu","nobody"): continue
+    if cmd(["id","-u",u])[0]!=0:
+      ea=[]
+      if str(x.get("ex","")).isdigit(): ea=["-e",(datetime(1970,1,1)+timedelta(days=int(x["ex"]))).strftime("%Y-%m-%d")]
+      if cmd(["useradd","-M","-s",shl]+ea+[u])[0]!=0: continue
+    else: cmd(["usermod","-s",shl,u])
+    if x.get("h"): cmd(["usermod","-p",str(x["h"]),u])
+    n+=1
+  if os.path.exists(TNET): cmd([TNET,"sync"])
+  for sv in ("sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"): cmd(["systemctl","restart",sv])
+  if tconf().get("TUN_HOST"):
+    cmd(["systemctl","restart","sshplus-tunnel"],30); threading.Thread(target=ports_sync,daemon=True).start()
+  threading.Timer(3,lambda: cmd(["systemctl","--no-block","restart","sshplus-panel"])).start()      # reload settings / password / certificate
+  return 200,{"ok":1,"users":n}
+
+# ---- 4) Telegram: alerts, daily backup, small bot. Goes direct first, then through the tunnel (Telegram is often blocked)
+def tg_cfg():
+  c=rjson(TGC,{}); c["token"]=dec(c.get("token","")); c["bpass"]=dec(c.get("bpass","")); return c
+
+def tg_base(): return os.environ.get("SSHPLUS_TG_BASE","https://api.telegram.org")
+
+def tg_call(method,params,file=None,timeout=20):
+  c=tg_cfg()
+  if not c.get("token"): return None
+  q=lambda v: str(v).replace("\\","\\\\").replace('"','\\"').replace("\n","\\n").replace("\r","")
+  base=['url = "%s/bot%s/%s"'%(tg_base(),c["token"],method),"silent","show-error","connect-timeout = 6","max-time = %d"%timeout]
+  for k,v in params.items(): base.append('form-string = "%s=%s"'%(k,q(v)))
+  if file: base.append('form = "document=@%s"'%file)
+  tries=[("direct",[])]
+  if tconf().get("TUN_HOST") and cmd(["ip","link","show",TUN_DEV])[0]==0: tries.append(("tun",['interface = "%s"'%TUN_LOCAL]))
+  if TG["via"]=="tun": tries.reverse()
+  for name,extra in tries:
+    try:
+      r=subprocess.run(["curl","-K","-"],input="\n".join(base+extra)+"\n",capture_output=True,text=True,timeout=timeout+8,env=ENV)
+      if r.returncode==0 and r.stdout.strip():
+        j=json.loads(r.stdout)
+        TG["via"]=name; return j
+    except Exception: pass
+  return None
+
+def tg_send(text):
+  c=tg_cfg()
+  if not (c.get("token") and c.get("chat")): return False
+  r=tg_call("sendMessage",{"chat_id":c["chat"],"text":str(text)[:3900]})
+  return bool(r and r.get("ok"))
+
+def tg_send_backup(tag="backup"):
+  c=tg_cfg()
+  if not (c.get("token") and c.get("chat") and c.get("bpass")): return False,"backup passphrase is not set"
+  try: raw=make_backup(c["bpass"])
+  except Exception as e: return False,str(e)
+  fn="/tmp/ckvpn-%s-%s.ckbk"%(tag,datetime.now().strftime("%Y%m%d-%H%M"))
+  fd=os.open(fn,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,raw); os.close(fd)
+  try: r=tg_call("sendDocument",{"chat_id":c["chat"],"caption":"CK.VPN backup (encrypted) v"+VERSION},file=fn,timeout=60)
+  finally:
+    try: os.remove(fn)
+    except OSError: pass
+  return bool(r and r.get("ok")),("" if (r and r.get("ok")) else "Telegram unreachable")
+
+def tg_save(d):
+  c=rjson(TGC,{})
+  if str(d.get("token","")).strip(): c["token"]=enc(str(d["token"]).strip())
+  if str(d.get("bpass","")).strip(): c["bpass"]=enc(str(d["bpass"]).strip())
+  if "chat" in d: c["chat"]=str(d.get("chat","")).strip()[:40]
+  a=d.get("alerts") or {}
+  c["alerts"]={k:bool(a.get(k)) for k in ("tunnel","quota","expiry","res","daily")}
+  try: c["hour"]=min(23,max(0,int(d.get("hour",3))))
+  except Exception: c["hour"]=3
+  wjson(TGC,c); return 200,{"ok":1}
+
+def tg_state():
+  c=rjson(TGC,{}); return {"set":bool(c.get("token")),"chat":c.get("chat",""),"bpass":bool(c.get("bpass")),
+    "alerts":c.get("alerts",{"tunnel":True,"quota":True,"expiry":True,"res":True,"daily":False}),"hour":c.get("hour",3)}
+
+def tg_detect():
+  r=tg_call("getUpdates",{"timeout":0},timeout=20)
+  if not r: return 200,{"ok":0,"msg":"Telegram unreachable (direct and through the tunnel)"}
+  seen={}
+  for u in r.get("result",[]):
+    m=u.get("message") or {}; ch=m.get("chat") or {}
+    if ch.get("id") is not None: seen[str(ch["id"])]=ch.get("title") or ch.get("username") or ch.get("first_name") or ""
+  return 200,{"ok":1,"chats":[{"id":k,"name":v} for k,v in seen.items()]}
+
+def fmt_bytes(n):
+  n=float(n)
+  for u in ("B","KB","MB","GB","TB"):
+    if n<1024 or u=="TB": return ("%.0f %s"%(n,u)) if u=="B" else ("%.1f %s"%(n,u))
+    n/=1024
+
+def status_text():
+  st=stats(); t=tunnel_status(False); users=get_users(st["om"])
+  l=["CK.VPN v%s"%VERSION,"CPU %s%% | RAM %s%%"%(st["cpu"],st["mem"]),
+     "Online: %d / %d users"%(st["on_tot"],len(users)),
+     "Dropbear: %s | tunnel Dropbear: %s | UDPGW: %s/%s"%("OK" if st["db"] else "DOWN","OK" if st["dbt"] else "DOWN","OK" if st["bv"] else "DOWN","OK" if st["bvt"] else "DOWN")]
+  l.append("Tunnel: "+(("UP (exit %s)"%(t["exit"] or t["host"])) if t["up"] else "DOWN") if t["conf"] else "Tunnel: not set up")
+  return "\n".join(l)
+
+def users_text(limit=40):
+  us=sorted(get_users({}),key=lambda x:-x["q"] if x["q"]>0 else 0)
+  out=[]
+  for x in us[:limit]:
+    out.append("%s  %s%s  %s  %s"%(x["u"],x["ugb"],("/%gGB"%x["q"]) if x["q"]>0 else "","exp "+x["exp"],"EXPIRED" if x["expd"] else ("FULL" if x["qfull"] else "")))
+  return "\n".join(out) or "no users"
+
+def tg_cmd(t):
+  w=(t.split() or [""])[0].split("@")[0].lower()
+  if w in ("/start","/help"): tg_send("CK.VPN bot\n/status  status\n/users  users and usage\n/online  who is online\n/backup  encrypted backup file")
+  elif w=="/status": tg_send(status_text())
+  elif w=="/users": tg_send(users_text())
+  elif w=="/online":
+    om=stats()["om"]; tg_send("\n".join("%s: %d"%(k,v) for k,v in sorted(om.items())) or "nobody online")
+  elif w=="/backup":
+    ok,er=tg_send_backup("manual")
+    if not ok: tg_send("backup failed: "+er)
+
+def tg_poll():
+  off=0
+  while True:
+    try:
+      c=tg_cfg()
+      if not (c.get("token") and c.get("chat")): time.sleep(10); continue
+      r=tg_call("getUpdates",{"offset":off,"timeout":10},timeout=25)
+      if not r or not r.get("ok"): time.sleep(20); continue
+      for u in r.get("result",[]):
+        off=u["update_id"]+1
+        m=u.get("message") or {}
+        if str((m.get("chat") or {}).get("id"))==str(c["chat"]): tg_cmd((m.get("text") or "").strip())
+      time.sleep(3)
+    except Exception: time.sleep(15)
+
+def tg_once(key,text):
+  s=rjson(TGS,{})
+  if s.get(key): return
+  if tg_send(text): s[key]=int(time.time()); wjson(TGS,s)
+
+def tg_clear(prefix):
+  s=rjson(TGS,{}); k=[x for x in s if x.startswith(prefix)]
+  for x in k: s.pop(x)
+  if k: wjson(TGS,s)
+
+def alerts_tick(res):
+  c=tg_cfg()
+  if not (c.get("token") and c.get("chat")): return
+  a=c.get("alerts",{"tunnel":True,"quota":True,"expiry":True,"res":True,"daily":False})
+  if a.get("tunnel") and res["up"]>=0:
+    if res["up"]==0:
+      TG["tdown"]+=1
+      if TG["tdown"]==2 and TG["tun"]!=0: TG["tun"]=0; tg_send("🔴 Tunnel is DOWN (tunnel accounts have no internet until it is back)")
+    else:
+      TG["tdown"]=0
+      if TG["tun"]==0: tg_send("🟢 Tunnel is UP again")
+      TG["tun"]=1
+  if a.get("res"):
+    hi=res["cpu"]>=90 or res["mem"]>=90
+    TG["cpu"]=TG["cpu"]+1 if hi else 0
+    if TG["cpu"]==3: tg_send("⚠️ High load for 3 minutes: CPU %s%% RAM %s%%"%(res["cpu"],res["mem"]))
+  if a.get("quota") or a.get("expiry"):
+    meta=rjson(META,{}); today=int(time.time()//86400); sh=shadow_map()
+    for u in user_uid_map():
+      m=meta.get(u,{}); q=float(m.get("q",0)); used=int(m.get("u",0))
+      if a.get("quota") and q>0:
+        pct=used/(q*1073741824.0)
+        if pct>=1: tg_once("q100:"+u,"⛔ %s: quota is FULL (%s of %g GB)"%(u,fmt_bytes(used),q))
+        elif pct>=0.9: tg_once("q90:"+u,"⚠️ %s: 90%% of the quota is used (%s of %g GB)"%(u,fmt_bytes(used),q))
+        else: tg_clear("q100:"+u); tg_clear("q90:"+u)
+      ex=sh.get(u,("",""))[1]
+      if a.get("expiry") and ex.isdigit():
+        dl=int(ex)-today
+        if dl<=0: tg_once("e0:"+u+":"+ex,"⛔ %s: account EXPIRED"%u)
+        elif dl<=3: tg_once("e3:"+u+":"+ex,"⏳ %s: %d day(s) left"%(u,dl))
+  if a.get("daily") and datetime.now().hour==int(c.get("hour",3)):
+    s=rjson(TGS,{}); day=datetime.now().strftime("%Y-%m-%d")
+    if s.get("backup_day")!=day:
+      s["backup_day"]=day; wjson(TGS,s); threading.Thread(target=tg_send_backup,args=("daily",),daemon=True).start()
+
+# ---- 5) templates and bulk creation
+def tpl_list(): return rjson(TPL,[])
+
+def tpl_save(d):
+  name=str(d.get("name","")).strip()[:40]
+  if not name: return 400,{"ok":0,"msg":"Template name required"}
+  t={"name":name,"d":max(1,int(float(d.get("d") or 30))),"q":max(0.0,float(d.get("q") or 0)),"l":max(1,int(float(d.get("l") or 1))),
+     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct"}
+  ls=[x for x in tpl_list() if x.get("name")!=name]+[t]; wjson(TPL,ls[:60]); return 200,{"ok":1}
+
+def tpl_del(d):
+  wjson(TPL,[x for x in tpl_list() if x.get("name")!=str(d.get("name",""))]); return 200,{"ok":1}
+
+def rand_pw(n=8): return "".join(secrets.choice(PWCH) for _ in range(n))
+
+def user_bulk(d):
+  prefix=str(d.get("prefix","")).strip()
+  try: count=int(d.get("count",0)); start=int(d.get("start",1) or 1)
+  except Exception: return 400,{"ok":0,"msg":"Invalid count"}
+  if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,20}$",prefix): return 400,{"ok":0,"msg":"Invalid prefix (letters/digits, max 21 chars)"}
+  if not 1<=count<=200: return 400,{"ok":0,"msg":"Count must be 1..200"}
+  same=str(d.get("pw","")).strip(); width=len(str(start+count-1)); made=[]; errs=[]
+  for i in range(count):
+    name="%s%0*d"%(prefix,width,start+i); pw=same or rand_pw(8)
+    c,r=user_save({"u":name,"pw":pw,"d":d.get("d",30),"q":d.get("q",0),"l":d.get("l",1),"pt":"All","tm":d.get("tm","direct"),"en":d.get("en","A")})
+    if c==200: made.append({"u":name,"pw":pw})
+    else: errs.append({"u":name,"msg":r.get("msg","")})
+  return 200,{"ok":1,"created":made,"errors":errs}
+
+# ---- 6) subscription links and QR codes
+def sub_find(tok):
+  if not re.match(r"^[0-9a-f]{24}$",str(tok)): return None
+  for u,m in rjson(META,{}).items():
+    if m.get("tok")==tok and u in user_uid_map(): return u
+  return None
+
+def sub_data(u,hosthdr):
+  x=next((y for y in get_users({}) if y["u"]==u),None)
+  if not x: return None
+  tc=tunnel_status(False); pc=rjson(PORTS,{}); out=x["tm"]=="tunnel"; inB=x.get("en")=="B" and tc["conf"]
+  host=tc["host"] if inB else re.sub(r":\d+$","",hosthdr or "")
+  dbl=list(pc.get("tdb" if out else "db",[]))
+  if inB:
+    mp={r["a"]:r["b"] for r in tc["rev_map"]}; s2=pc.get("ssh2") or 0
+    ssh=[mp[s2]] if s2 in mp else []; dbl=[mp[p] for p in dbl if p in mp]
+  else: ssh=sorted(sshd_ports())
+  x.update({"host":host,"ssh":ssh,"db":dbl,"in":"B" if inB else "A","out":"B" if out else "A","exit":(tc["exit"] or tc["host"]) if out else host})
+  return x
+
+def ssh_uri(x):
+  p=(x["db"] or x["ssh"] or [22])[0]
+  return "ssh://%s:%s@%s:%d#%s"%(quote(x["u"],safe=""),quote(x["pw"],safe=""),x["host"],p,quote("CK.VPN-"+x["u"],safe=""))
+
+def qr_svg(text):
+  if not HAVE_QR: return ""
+  img=qrcode.make(text,image_factory=qrcode.image.svg.SvgPathImage,box_size=10,border=2)
+  b=io.BytesIO(); img.save(b); return b.getvalue().decode()
+
+SUBHTML='''<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CK.VPN - @@USER@@</title><meta name="robots" content="noindex">
+<style>:root{--bg:#0b1120;--card:#111827;--bd:#1f2937;--tx:#f3f4f6;--mu:#9ca3af;--pr:#06b6d4;--ok:#10b981;--er:#ef4444;--wn:#f59e0b}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,Tahoma,sans-serif}body{background:var(--bg);color:var(--tx);padding:1rem;max-width:560px;margin:auto}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:1.1rem;margin-bottom:1rem}h1{font-size:1.3rem}h3{margin-bottom:.6rem;color:var(--pr)}
+.row{display:flex;justify-content:space-between;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--bd);font-size:.9rem}.row:last-child{border:0}.row span:first-child{color:var(--mu)}
+.bar{height:10px;border-radius:99px;background:#080c17;overflow:hidden;margin:.5rem 0}.bar>i{display:block;height:100%;background:var(--pr)}
+.btn{background:var(--pr);color:#031116;border:0;padding:.5rem .9rem;border-radius:8px;font-weight:700;cursor:pointer;margin:.15rem}
+.bdg{padding:.15rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700}.ok{background:rgba(16,185,129,.15);color:var(--ok)}.er{background:rgba(239,68,68,.15);color:var(--er)}
+code{direction:ltr;display:inline-block;word-break:break-all;color:var(--pr)}.qr{background:#fff;border-radius:12px;padding:10px;max-width:240px;margin:.6rem auto}.qr svg{width:100%;height:auto;display:block}</style></head><body>
+<div class="card" style="display:flex;align-items:center;gap:.8rem"><div style="font-size:2rem;font-weight:800;color:var(--pr)">CK</div><div><h1>CK.VPN</h1><div style="color:var(--mu);font-size:.8rem">@@USER@@</div></div></div>
+<div class="card"><h3>وضعیت اکانت</h3>
+<div class="row"><span>وضعیت</span><span class="bdg @@STCLS@@">@@STTXT@@</span></div>
+<div class="row"><span>انقضا</span><span dir="ltr">@@EXP@@ (@@DL@@ روز)</span></div>
+<div class="row"><span>مصرف</span><span dir="ltr">@@USED@@ / @@QUOTA@@</span></div><div class="bar"><i style="width:@@PCT@@%"></i></div>
+<div class="row"><span>اتصال همزمان</span><span>@@LIM@@</span></div></div>
+<div class="card"><h3>اطلاعات اتصال</h3>
+<div class="row"><span>آدرس</span><code>@@HOST@@</code></div><div class="row"><span>نام کاربری</span><code>@@USER@@</code></div><div class="row"><span>رمز</span><code>@@PASS@@</code></div>
+<div class="row"><span>پورت‌های SSH</span><code>@@SSH@@</code></div><div class="row"><span>پورت‌های Dropbear</span><code>@@DB@@</code></div>
+<div class="row"><span>UDPGW</span><code>127.0.0.1:7300</code></div>
+<div class="row"><span>IP خروجی</span><code>@@EXIT@@</code></div></div>
+<div class="card" style="text-align:center"><h3>لینک و QR</h3><div class="qr">@@QR@@</div><div style="margin:.5rem 0"><code>@@URI@@</code></div>
+<button class="btn" onclick="cp(@@URIJS@@)">کپی لینک ssh</button><button class="btn" onclick="cp(@@ALLJS@@)">کپی همه‌ی اطلاعات</button></div>
+<script>function cp(t){if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){alert("کپی شد")},function(){prompt("Copy:",t)});else prompt("Copy:",t)}</script></body></html>'''
+
+def sub_page(u,hosthdr):
+  x=sub_data(u,hosthdr)
+  if not x: return None
+  esc_=lambda v: (str(v).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;"))
+  uri=ssh_uri(x); q=x["q"]; used_txt=x["ugb"]
+  try: pct=min(100,int(100*float(x["ugb"].split()[0])*(1024 if x["ugb"].endswith("GB") else 1)/(q*1024))) if q>0 else 0
+  except Exception: pct=0
+  bad=x["expd"] or x["qfull"]
+  allt="Host: %s\nUser: %s\nPass: %s\nSSH ports: %s\nDropbear ports: %s\nUDPGW: 127.0.0.1:7300"%(x["host"],x["u"],x["pw"],", ".join(map(str,x["ssh"])) or "-",", ".join(map(str,x["db"])) or "-")
+  rep={"USER":esc_(x["u"]),"STCLS":"er" if bad else "ok","STTXT":"منقضی/پر" if bad else "فعال","EXP":esc_(x["exp"]),"DL":x["dl"],"USED":esc_(used_txt),
+       "QUOTA":("%g GB"%q) if q>0 else "نامحدود","PCT":pct,"LIM":x["lim"],"HOST":esc_(x["host"]),"PASS":esc_(x["pw"]),
+       "SSH":esc_(", ".join(map(str,x["ssh"])) or "-"),"DB":esc_(", ".join(map(str,x["db"])) or "-"),"EXIT":esc_(x["exit"]),
+       "QR":qr_svg(uri) or "<div style='color:#555;font-size:.8rem'>QR unavailable (python3-qrcode)</div>","URI":esc_(uri),
+       "URIJS":json.dumps(uri).replace("<","\\u003c"),"ALLJS":json.dumps(allt).replace("<","\\u003c")}
+  h=SUBHTML
+  for k,v in rep.items(): h=h.replace("@@%s@@"%k,str(v))
+  return h
+
+# ---- 7) history: tunnel health, load, daily traffic per user
+def res_now():
+  try:
+    l1=float(open("/proc/loadavg").read().split()[0]); cpu=min(100.0,round((l1/(os.cpu_count() or 1))*100,1))
+  except Exception: cpu=0.0
+  try:
+    mi={l.split()[0].rstrip(":"):int(l.split()[1]) for l in open("/proc/meminfo") if len(l.split())>=2}
+    mem=round(((mi.get("MemTotal",1)-mi.get("MemAvailable",0))/mi.get("MemTotal",1))*100,1)
+  except Exception: mem=0.0
+  up=-1; rtt=0
+  if tconf().get("TUN_HOST"):
+    rc,o,_=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)
+    up=1 if rc==0 else 0
+    m=re.search(r"time=([\d.]+)",o)
+    if m: rtt=float(m.group(1))
+  return {"t":int(time.time()),"up":up,"rtt":rtt,"cpu":cpu,"mem":mem}
+
+def hist_tick():
+  r=res_now(); h=rjson(HIST,{"s":[],"d":{}})
+  h["s"]=(h.get("s",[])+[[r["t"],r["up"],r["rtt"],r["cpu"],r["mem"]]])[-1440:]
+  day=datetime.now().strftime("%Y-%m-%d"); dd=h.setdefault("d",{}); cur=dd.setdefault(day,{})
+  with ML:
+    snap=dict(DAYU); DAYU.clear()
+  for u,b in snap.items(): cur[u]=int(cur.get(u,0))+int(b)
+  for k in sorted(dd)[:-35]: dd.pop(k,None)
+  wjson(HIST,h)
+  return r
+
+def hist_get():
+  h=rjson(HIST,{"s":[],"d":{}}); days=sorted(h.get("d",{}))[-14:]
+  return {"s":h.get("s",[]),"d":{k:h["d"][k] for k in days}}
+
 # ---------- HTTP ----------
 class Srv(ThreadingHTTPServer):
-  allow_reuse_address=True; daemon_threads=True; request_queue_size=64
+  allow_reuse_address=True; daemon_threads=True; request_queue_size=64; ctx=None
+  def finish_request(s,request,client_address):
+    try:
+      if s.ctx is not None:
+        request.settimeout(10)
+        if request.recv(1,socket.MSG_PEEK)==b"\x16": request=s.ctx.wrap_socket(request,server_side=True)
+        else:                                   # plain HTTP on the TLS port: answer with a redirect to https
+          buf=request.recv(4096); host=""
+          for l in buf.split(b"\r\n"):
+            if l.lower().startswith(b"host:"): host=l[5:].strip().decode("latin1")[:100]
+          host=re.sub(r"[^A-Za-z0-9.:\[\]-]","",host) or "localhost"
+          request.sendall(("HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"%host).encode())
+          return
+        request.settimeout(None)
+      s.RequestHandlerClass(request,client_address,s)
+    except Exception: pass
+    finally:
+      try: request.close()
+      except Exception: pass
 
 class H(BaseHTTPRequestHandler):
   def log_message(s,*a): pass
@@ -1362,6 +1812,10 @@ class H(BaseHTTPRequestHandler):
     b=json.dumps(d).encode("utf-8")
     s.send_response(c); s.send_header("Content-Type","application/json; charset=utf-8")
     s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b)
+  def raw(s,b,ctype,c=200,extra=None):
+    s.send_response(c); s.send_header("Content-Type",ctype); s.send_header("Content-Length",str(len(b)))
+    for k,v in (extra or {}).items(): s.send_header(k,v)
+    s.end_headers(); s.wfile.write(b)
   def auth(s):
     a=s.headers.get("Authorization","")
     return a.startswith("Bearer ") and TOK.get(a[7:].strip(),0)>time.time()
@@ -1372,12 +1826,27 @@ class H(BaseHTTPRequestHandler):
         b=open(HTML,"rb").read()
         s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8")
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
+      if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
+        k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
+        if len(FAIL[k])>=20: s.js({"err":2},429); return
+        u=sub_find(p[3:]); h=sub_page(u,s.headers.get("Host","")) if u else None
+        if not h: FAIL[k].append(now); s.raw(b"not found","text/plain",404); return
+        s.raw(h.encode(),"text/html; charset=utf-8",200,{"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Robots-Tag":"noindex"}); return
       if not s.auth(): s.js({"err":1},401); return
+      if must_change(): s.js({"err":"must_change"},403); return
+      if p=="/api/qr":
+        u=parse_qs(urlparse(s.path).query).get("u",[""])[0]; x=sub_data(u,s.headers.get("Host",""))
+        if not x: s.js({"err":404},404); return
+        s.raw(qr_svg(ssh_uri(x)).encode(),"image/svg+xml"); return
+      if p=="/api/history": s.js(hist_get()); return
+      if p=="/api/telegram": s.js(tg_state()); return
+      if p=="/api/templates": s.js(tpl_list()); return
+      if p=="/api/cert": s.js({"info":cert_info(),"https":bool(SRV[0] and SRV[0].ctx is not None)}); return
       if p=="/api/overview":
         st=stats(); bv=read_bv()
         pc=rjson(PORTS,{"ssh":22,"ssh2":2222,"db":[]}); pc["ssh_all"]=sorted(sshd_ports()); pc.setdefault("tdb",[])
         adm=str(rjson(CFG,{"username":"admin"}).get("username","admin")).strip()
-        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"tun":tunnel_status(False),"users":get_users(st["om"])}); return
+        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"tun":tunnel_status(False),"ver":VERSION,"fer":HAVE_FERNET,"qr":HAVE_QR,"users":get_users(st["om"])}); return
       if p=="/api/tunnel": s.js(tunnel_status(True)); return
       s.js({"err":404},404)
     except Exception as e:
@@ -1396,12 +1865,31 @@ class H(BaseHTTPRequestHandler):
         in_u=str(d.get("u","")).strip(); in_p=str(d.get("p","")).strip()
         cu=str(c.get("username","admin")).strip(); cp=str(c.get("password","admin")).strip()
         if in_u.lower()==cu.lower() and secrets.compare_digest(in_p.encode(),cp.encode()):
-          t=secrets.token_hex(16); TOK[t]=time.time()+86400; s.js({"tok":t})
+          t=secrets.token_hex(16); TOK[t]=time.time()+86400; s.js({"tok":t,"chg":1 if must_change() else 0})
         else:
           FAIL[ip].append(time.time()); s.js({"err":1},401)
         return
       if not s.auth(): s.js({"err":1},401); return
+      if must_change() and p!="/api/admin": s.js({"err":"must_change"},403); return
       if p=="/api/user/save": c,r=user_save(d); s.js(r,c)
+      elif p=="/api/user/bulk": c,r=user_bulk(d); s.js(r,c)
+      elif p=="/api/template/save": c,r=tpl_save(d); s.js(r,c)
+      elif p=="/api/template/del": c,r=tpl_del(d); s.js(r,c)
+      elif p=="/api/cert": c,r=cert_save(d); s.js(r,c)
+      elif p=="/api/telegram": c,r=tg_save(d); s.js(r,c)
+      elif p=="/api/telegram/test": s.js({"ok":1 if tg_send("✅ CK.VPN v%s: Telegram connection works"%VERSION) else 0})
+      elif p=="/api/telegram/detect": c,r=tg_detect(); s.js(r,c)
+      elif p=="/api/telegram/backup": ok,er=tg_send_backup("manual"); s.js({"ok":1 if ok else 0,"msg":er})
+      elif p=="/api/backup":
+        pw=str(d.get("pass",""));
+        if len(pw)<6: s.js({"ok":0,"msg":"Passphrase must be at least 6 characters"},400); return
+        try: b=make_backup(pw)
+        except Exception as e: s.js({"ok":0,"msg":str(e)[:100]},500); return
+        s.raw(b,"application/octet-stream",200,{"Content-Disposition":'attachment; filename="ckvpn-%s.ckbk"'%datetime.now().strftime("%Y%m%d-%H%M")})
+      elif p=="/api/restore":
+        try: raw=base64.b64decode(str(d.get("data","")))
+        except Exception: s.js({"ok":0,"msg":"Invalid file"},400); return
+        c,r=restore_backup(raw,str(d.get("pass",""))); s.js(r,c)
       elif p=="/api/user/del": c,r=user_del(d); s.js(r,c)
       elif p=="/api/ports": c,r=apply_ports(d); s.js(r,c)
       elif p=="/api/badvpn": c,r=save_bv(d); s.js(r,c)
@@ -1418,6 +1906,7 @@ class H(BaseHTTPRequestHandler):
         c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"})
         au=str(d.get("u","")).strip() or str(c.get("username","admin")).strip()
         ap=str(d.get("p","")).strip() or str(c.get("password","admin")).strip()
+        if must_change() and (len(ap)<8 or ap=="admin"): s.js({"ok":0,"msg":"New password must be at least 8 characters and not 'admin'"},400); return
         if len(au)>=2 and len(ap)>=2:
           c["username"]=au; c["password"]=ap; wjson(CFG,c)
           t=secrets.token_hex(16); TOK[t]=time.time()+86400
@@ -1441,10 +1930,18 @@ def cli_tunnel_setup(host,port,user):
 if __name__=="__main__":
   if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4]))
   open(DB,"a").close()
+  try: migrate_secrets()
+  except Exception: pass
   threading.Thread(target=mon,daemon=True).start()
+  threading.Thread(target=tg_poll,daemon=True).start()
   c=rjson(CFG,{})
-  Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H).serve_forever()
+  srv=Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H); SRV[0]=srv
+  try:
+    if ensure_cert(): srv.ctx=tls_ctx()
+  except Exception: srv.ctx=None                 # no openssl / bad certificate: fall back to plain HTTP
+  srv.serve_forever()
 PYEOF
+sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/app.py
 chmod 755 /opt/sshplus-panel/app.py
 python3 -m py_compile /opt/sshplus-panel/app.py || { echo "FAILED: app.py syntax error"; exit 1; }
 echo "=== STEP 3 OK ==="
@@ -1467,6 +1964,7 @@ body{background:var(--bg);color:var(--tx);padding:1rem;max-width:1280px;margin:a
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1.1rem;margin-bottom:1rem}
 .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:.75rem;margin-bottom:1rem}
 .g2{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:1rem;margin-bottom:1rem}
+textarea{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem;font-family:monospace;font-size:.75rem}
 input,select{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem}
 label{font-size:.8rem;color:var(--mu)}
 .btn{background:var(--pr);color:#031116;border:none;padding:.55rem 1rem;border-radius:8px;font-weight:700;cursor:pointer}
@@ -1487,6 +1985,25 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
   <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
   <button class="btn" style="width:100%" onclick="login()">ورود / Login</button>
+</div></div>
+
+<div id="fpBox" class="modal hid" style="z-index:120"><div class="card" style="width:100%;max-width:380px">
+  <h3 style="color:var(--wn);margin-bottom:.6rem">🔐 تغییر رمز پیش‌فرض</h3>
+  <div style="font-size:.82rem;color:var(--mu);margin-bottom:.7rem;line-height:1.8">رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).</div>
+  <label>رمز جدید</label><input id="fp1" type="password" autocomplete="new-password" autocapitalize="none">
+  <label>تکرار رمز</label><input id="fp2" type="password" autocomplete="new-password" autocapitalize="none" onkeydown="if(event.key==='Enter')saveFp()">
+  <button class="btn" style="width:100%" onclick="saveFp()">ذخیره و ادامه</button>
+</div></div>
+
+<div id="subBox" class="modal hid"><div class="card" style="width:100%;max-width:360px;text-align:center">
+  <h3 id="subTit" style="margin-bottom:.4rem"></h3>
+  <div id="subQr" style="background:#fff;border-radius:12px;padding:10px;max-width:240px;margin:.5rem auto"></div>
+  <div id="subLink" dir="ltr" style="font-size:.72rem;word-break:break-all;color:var(--pr);margin:.4rem 0"></div>
+  <div style="display:flex;gap:.4rem;justify-content:center;flex-wrap:wrap">
+    <button class="btn btn-s" onclick="subCopy()">📋 کپی لینک اشتراک</button>
+    <button class="btn btn-s btn-w" onclick="window.open(subUrl)">🔗 باز کردن</button>
+    <button class="btn btn-s btn-e" onclick="$('subBox').classList.add('hid')">بستن</button>
+  </div>
 </div></div>
 
 <div id="eBox" class="modal hid"><div class="card" style="width:100%;max-width:420px">
@@ -1521,6 +2038,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 <div class="tab-bar">
   <button id="bTabU" class="tab-btn act" onclick="swTab('u')">👥 کاربران</button>
   <button id="bTabT" class="tab-btn" onclick="swTab('t')">🌐 تانل</button>
+  <button id="bTabH" class="tab-btn" onclick="swTab('h')">📈 آمار</button>
   <button id="bTabS" class="tab-btn" onclick="swTab('s')">⚙️ تنظیمات سرور</button>
 </div>
 
@@ -1536,6 +2054,12 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 
   <div class="card">
     <h3 style="margin-bottom:.7rem">➕ ساخت کاربر جدید</h3>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
+      <label style="margin:0">قالب:</label>
+      <select id="tplSel" style="width:auto;margin:0;min-width:150px" onchange="applyTpl()"><option value="">— بدون قالب —</option></select>
+      <button class="btn btn-s btn-o" onclick="saveTpl()">💾 ذخیره فرم به‌عنوان قالب</button>
+      <button class="btn btn-s btn-e" onclick="delTpl()">🗑️</button>
+    </div>
     <div class="row">
       <div><label>نام کاربری (انگلیسی)</label><input id="nu" placeholder="user1" autocapitalize="none"></div>
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
@@ -1548,6 +2072,23 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     </div>
     <div id="nHint" style="font-size:.8rem;color:var(--mu);margin:.2rem 0 .7rem;line-height:1.8"></div>
     <button class="btn" onclick="saveUser(0)">ایجاد اکانت</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.7rem">📦 ساخت دسته‌ای اکانت</h3>
+    <div class="row">
+      <div><label>پیشوند نام</label><input id="bu_pf" placeholder="cust" autocapitalize="none"></div>
+      <div><label>تعداد (۱ تا ۲۰۰)</label><input id="bu_n" type="number" value="10" min="1" max="200"></div>
+      <div><label>شروع شماره</label><input id="bu_s" type="number" value="1" min="0"></div>
+      <div><label>روز اعتبار</label><input id="bu_d" type="number" value="30" min="1"></div>
+      <div><label>حجم (GB | 0=نامحدود)</label><input id="bu_q" type="number" value="0" min="0" step="0.5"></div>
+      <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
+      <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
+      <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
+      <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
+    </div>
+    <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
+    <div id="bkRes" style="margin-top:.7rem"></div>
   </div>
 
   <div class="card" style="overflow-x:auto">
@@ -1610,6 +2151,16 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   </div>
 </div>
 
+<div id="secH" class="hid">
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🌐 وضعیت تانل (۲۴ ساعت گذشته)</h3>
+    <div id="hTunSum" style="font-size:.82rem;color:var(--mu);margin-bottom:.4rem"></div><canvas id="cTun" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده</div></div>
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🖥️ بار سرور (۲۴ ساعت)</h3><canvas id="cLoad" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">آبی: CPU · نارنجی: RAM</div></div>
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">📊 مصرف روزانه‌ی کل (۱۴ روز)</h3><canvas id="cDay" style="width:100%;display:block"></canvas></div>
+  <div class="card" style="overflow-x:auto"><h3 style="margin-bottom:.4rem;color:var(--pr)">🏆 پرمصرف‌ترین کاربران (۷ روز)</h3><div id="hTop"></div></div>
+</div>
+
 <div id="secS" class="hid">
   <div class="g2">
     <div class="card">
@@ -1663,6 +2214,52 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     </div>
     <button class="btn btn-s btn-w" onclick="saveBv()">ذخیره و ری‌استارت BadVPN</button>
   </div>
+
+  <div class="g2">
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🔒 HTTPS و گواهی</h3>
+    <div id="certInfo" style="font-size:.78rem;color:var(--mu);white-space:pre-wrap;direction:ltr;text-align:left;margin-bottom:.6rem"></div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.</div>
+    <label>گواهی (fullchain، فرمت PEM)</label><textarea id="certPem" rows="3" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+    <label>کلید خصوصی (PEM)</label><textarea id="certKey" rows="3" dir="ltr" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+    <button class="btn btn-s" onclick="saveCert()">آپلود گواهی</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">💾 بکاپ و بازیابی</h3>
+    <div id="bkWarn" style="font-size:.8rem;color:var(--wn);margin-bottom:.4rem"></div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.</div>
+    <label>پسفریز (حداقل ۶ کاراکتر)</label><input id="bkPass" type="password" autocomplete="off" autocapitalize="none">
+    <button class="btn btn-s btn-o" onclick="doBackup()">⬇️ دانلود بکاپ</button>
+    <label style="display:block;margin-top:.9rem">بازیابی از فایل بکاپ (.ckbk)</label><input id="bkFile" type="file" accept=".ckbk">
+    <button class="btn btn-s btn-w" onclick="doRestore()">⬆️ بازیابی (پنل ری‌استارت می‌شود)</button>
+  </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🤖 ربات و هشدار تلگرام</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">ابتدا در تلگرام با @BotFather یک ربات بساز و توکن را اینجا بگذار؛ بعد به ربات پیام <span dir="ltr">/start</span> بده و «پیدا کردن Chat ID» را بزن. اگر تلگرام از روی این سرور باز نمی‌شود، پنل خودکار از مسیر تانل می‌فرستد.</div>
+    <div class="row">
+      <div><label>توکن ربات <span id="tgSet" style="color:var(--ok)"></span></label><input id="tgToken" type="password" placeholder="123456:ABC..." autocomplete="off" autocapitalize="none"></div>
+      <div><label>Chat ID</label><input id="tgChat" autocapitalize="none" placeholder="123456789"></div>
+      <div><label>پسفریز بکاپ خودکار <span id="tgBp" style="color:var(--ok)"></span></label><input id="tgBpass" type="password" autocomplete="off" autocapitalize="none"></div>
+      <div><label>ساعت بکاپ روزانه (۰ تا ۲۳)</label><input id="tgHour" type="number" min="0" max="23" value="3"></div>
+    </div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:.85rem;margin-bottom:.8rem">
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_tunnel" style="width:auto;margin:0"> قطع/وصل تانل</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_quota" style="width:auto;margin:0"> ۹۰٪ و پر شدن حجم</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_expiry" style="width:auto;margin:0"> نزدیک/پایان انقضا</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_res" style="width:auto;margin:0"> فشار CPU/RAM</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_daily" style="width:auto;margin:0"> بکاپ روزانه به تلگرام</label>
+    </div>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+      <button class="btn btn-s" onclick="saveTg()">💾 ذخیره</button>
+      <button class="btn btn-s btn-o" onclick="tgTest()">📨 پیام آزمایشی</button>
+      <button class="btn btn-s btn-w" onclick="tgDetect()">🔎 پیدا کردن Chat ID</button>
+      <button class="btn btn-s btn-w" onclick="tgBackup()">💾 ارسال بکاپ همین حالا</button>
+    </div>
+    <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.8">دستورهای ربات (فقط از Chat ID تنظیم‌شده): <span dir="ltr">/status /users /online /backup</span></div>
+  </div>
 </div>
 
 <script>
@@ -1671,9 +2268,11 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 let tnCfg={};
 let tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="";
 function swTab(t){
-  $("secU").classList.toggle("hid",t!=="u"); $("secS").classList.toggle("hid",t!=="s"); $("secT").classList.toggle("hid",t!=="t");
-  $("bTabU").classList.toggle("act",t==="u"); $("bTabS").classList.toggle("act",t==="s"); $("bTabT").classList.toggle("act",t==="t");
+  $("secU").classList.toggle("hid",t!=="u"); $("secS").classList.toggle("hid",t!=="s"); $("secT").classList.toggle("hid",t!=="t"); $("secH").classList.toggle("hid",t!=="h");
+  $("bTabU").classList.toggle("act",t==="u"); $("bTabS").classList.toggle("act",t==="s"); $("bTabT").classList.toggle("act",t==="t"); $("bTabH").classList.toggle("act",t==="h");
   if(t==="t") loadTun();
+  if(t==="h") loadHist();
+  if(t==="s"){loadCert();loadTg()}
 }
 function srvName(v){return v==="B"?"S2":"S1"}
 function revMap(){const m={};(tnCfg.rev_map||[]).forEach(r=>{m[r.a]=r.b});return m}
@@ -1682,7 +2281,7 @@ function routeBadge(x){
   return `<span class="bdg ${(x.en==="B"||x.tm==="tunnel")?"wn":"ok"}" title="In: ${esc(inH)} | Out: ${esc(outH)}">${srvName(x.en)} → ${srvName(x.tm==="tunnel"?"B":"A")}</span>`;
 }
 function fillSrv(){
-  ["nen","nex","een","eex"].forEach(id=>{
+  ["nen","nex","een","eex","bu_en","bu_ex"].forEach(id=>{
     const o=$(id).options; o[0].text="سرور ۱"; o[0].title=location.hostname;
     o[1].text=tnCfg.conf?"سرور ۲":"سرور ۲ (تانل نصب نیست)"; o[1].title=tnCfg.host||""; o[1].disabled=!tnCfg.conf;
     if(!tnCfg.conf&&$(id).value==="B") $(id).value="A";
@@ -1708,13 +2307,24 @@ async function api(u,m="GET",b=null){
   if(b){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(b)}
   const r=await fetch(u,o);
   if(r.status===401){localStorage.removeItem("tok");$("lBox").classList.remove("hid");throw new Error("401")}
-  return r.json();
+  const j=await r.json().catch(()=>({}));
+  if(r.status===403&&j.err==="must_change"){showFp();throw new Error("must_change")}
+  return j;
+}
+function showFp(){$("fpBox").classList.remove("hid")}
+async function saveFp(){
+  const a=$("fp1").value, b=$("fp2").value;
+  if(a.length<8||a==="admin"){alert("رمز باید حداقل ۸ کاراکتر و غیر از admin باشد");return}
+  if(a!==b){alert("تکرار رمز یکسان نیست");return}
+  const r=await fetch("/api/admin",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:JSON.stringify({p:a})});
+  const j=await r.json();
+  if(j.ok){tok=j.tok;localStorage.setItem("tok",tok);$("fpBox").classList.add("hid");$("fp1").value="";$("fp2").value="";$("lp").value="";load(1);loadTpl().catch(()=>{})}else alert(j.msg||"Error");
 }
 async function login(){
   const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})});
   if(r.status===429){alert("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید");return}
   const j=await r.json();
-  if(j.tok){tok=j.tok;localStorage.setItem("tok",tok);$("lBox").classList.add("hid");load(1)}else alert("نام کاربری یا رمز عبور اشتباه است");
+  if(j.tok){tok=j.tok;localStorage.setItem("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else alert("نام کاربری یا رمز عبور اشتباه است");
 }
 function portOpts(sp,db){
   let o='<option value="All">همه پورت‌ها</option>';
@@ -1729,7 +2339,7 @@ async function load(force){
   const sp=(pCfg.ssh_all&&pCfg.ssh_all.length)?pCfg.ssh_all:[22];
   const db=pCfg.db||[];
   $("stU").innerText=d.st.on_tot+" / "+ul.length;
-  const tn=d.tun||{}; tnCfg=tn; fillSrv();
+  const tn=d.tun||{}; tnCfg=tn; fillSrv(); ovExtra(d);
   $("stTn").innerHTML=(tn.conf?(tn.up?`<span class="bdg ok">TUNNEL UP</span> <span style="font-size:.75rem;color:var(--mu)">${esc(tn.exit||"")}</span>`:`<span class="bdg er">TUNNEL DOWN</span>`):`<span class="bdg wn">OFF</span>`)
     +" "+(d.st.dbt?`<span class="bdg ok">DB-T (${(pCfg.tdb||[]).join(",")})</span>`:`<span class="bdg er">DB-T STOPPED</span>`);
   $("stDb").innerHTML=d.st.db?`<span class="bdg ok">ACTIVE (${db.join(",")})</span>`:`<span class="bdg er">STOPPED</span>`;
@@ -1765,6 +2375,7 @@ async function load(force){
     <td style="display:flex;gap:.3rem;flex-wrap:wrap">
       <button class="btn btn-s" onclick="editU('${esc(x.u)}')">✏️</button>
       <button class="btn btn-s btn-w" onclick="copyU('${esc(x.u)}')">📋</button>
+      <button class="btn btn-s" onclick="subU('${esc(x.u)}')" title="لینک اشتراک و QR">🔗</button>
       <button class="btn btn-s btn-e" onclick="delU('${esc(x.u)}')">🗑️</button>
     </td></tr>`).join("");
 }
@@ -1855,6 +2466,127 @@ async function tunPorts(){
   if(r.err) m.push("خطا: "+r.err);
   alert(m.join("\n")); load(1); loadTun();
 }
+// ---- version / feature warnings
+function ovExtra(d){
+  if($("ver")&&d.ver) $("ver").innerText="v"+d.ver;
+  const w=[]; if(!d.fer) w.push("python3-cryptography نصب نیست: رمزها رمزنگاری نمی‌شوند و بکاپ کار نمی‌کند."); if(!d.qr) w.push("python3-qrcode نصب نیست: QR نمایش داده نمی‌شود.");
+  $("bkWarn").innerText=w.join(" ");
+}
+// ---- HTTPS
+async function loadCert(){const d=await api("/api/cert"); $("certInfo").innerText=(d.https?"HTTPS: ON":"HTTPS: OFF (HTTP ساده)")+"\n"+(d.info||"")}
+async function saveCert(){
+  const r=await api("/api/cert","POST",{cert:$("certPem").value,key:$("certKey").value});
+  alert(r.ok?"گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)":(r.msg||"Error")); if(r.ok){$("certPem").value="";$("certKey").value="";loadCert()}
+}
+// ---- backup / restore
+async function doBackup(){
+  const pw=$("bkPass").value; if(pw.length<6){alert("پسفریز حداقل ۶ کاراکتر");return}
+  const r=await fetch("/api/backup",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:JSON.stringify({pass:pw})});
+  if(!r.ok){const j=await r.json().catch(()=>({})); alert(j.msg||"Error"); return}
+  const b=await r.blob(), a=document.createElement("a"), cd=r.headers.get("Content-Disposition")||"";
+  a.href=URL.createObjectURL(b); a.download=(cd.match(/filename="([^"]+)"/)||[])[1]||"ckvpn.ckbk"; document.body.appendChild(a); a.click(); a.remove();
+}
+function doRestore(){
+  const f=$("bkFile").files[0], pw=$("bkPass").value; if(!f){alert("فایل بکاپ را انتخاب کن");return} if(!pw){alert("پسفریز را وارد کن");return}
+  if(!confirm("بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟")) return;
+  const rd=new FileReader();
+  rd.onload=async()=>{
+    const b64=String(rd.result).split(",")[1]||"";
+    const r=await api("/api/restore","POST",{data:b64,pass:pw});
+    if(r.ok){alert("بازیابی انجام شد ("+r.users+" کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.");setTimeout(()=>{localStorage.removeItem("tok");location.reload()},5000)}else alert(r.msg||"Error");
+  };
+  rd.readAsDataURL(f);
+}
+// ---- Telegram
+async function loadTg(){
+  const d=await api("/api/telegram"); $("tgChat").value=d.chat||""; $("tgHour").value=d.hour??3;
+  $("tgSet").innerText=d.set?"(ذخیره شده)":""; $("tgBp").innerText=d.bpass?"(ذخیره شده)":"";
+  ["tunnel","quota","expiry","res","daily"].forEach(k=>$("tgA_"+k).checked=!!(d.alerts||{})[k]);
+}
+function tgBody(){const a={};["tunnel","quota","expiry","res","daily"].forEach(k=>a[k]=$("tgA_"+k).checked);return {token:$("tgToken").value,chat:$("tgChat").value,bpass:$("tgBpass").value,hour:$("tgHour").value,alerts:a}}
+async function saveTg(){const r=await api("/api/telegram","POST",tgBody()); if(r.ok){$("tgToken").value="";$("tgBpass").value="";alert("ذخیره شد");loadTg()}else alert(r.msg||"Error")}
+async function tgTest(){await saveTg(); const r=await api("/api/telegram/test","POST",{}); alert(r.ok?"پیام ارسال شد":"ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن")}
+async function tgDetect(){
+  await saveTg(); const r=await api("/api/telegram/detect","POST",{});
+  if(!r.ok){alert(r.msg||"Error");return}
+  if(!(r.chats||[]).length){alert("پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن");return}
+  $("tgChat").value=r.chats[r.chats.length-1].id; alert("Chat ID پیدا شد: "+r.chats.map(c=>c.id+" ("+c.name+")").join(", ")+"\nذخیره را بزن.");
+}
+async function tgBackup(){const r=await api("/api/telegram/backup","POST",{}); alert(r.ok?"بکاپ به تلگرام ارسال شد":("ارسال نشد: "+(r.msg||"")))}
+// ---- templates
+let tpls=[];
+async function loadTpl(){tpls=await api("/api/templates"); $("tplSel").innerHTML='<option value="">— بدون قالب —</option>'+tpls.map(t=>`<option value="${esc(t.name)}">${esc(t.name)}</option>`).join("")}
+function applyTpl(){
+  const t=tpls.find(x=>x.name===$("tplSel").value); if(!t) return;
+  $("nd").value=t.d; $("nq").value=t.q; $("nl").value=t.l; $("nen").value=(t.en==="B"&&tnCfg.conf)?"B":"A"; $("nex").value=(t.tm==="tunnel"&&tnCfg.conf)?"B":"A"; fillPorts();
+}
+async function saveTpl(){
+  const name=prompt("نام قالب:"); if(!name) return;
+  const r=await api("/api/template/save","POST",{name,d:$("nd").value,q:$("nq").value,l:$("nl").value,en:$("nen").value,tm:$("nex").value==="B"?"tunnel":"direct"});
+  if(r.ok){await loadTpl();$("tplSel").value=name}else alert(r.msg||"Error");
+}
+async function delTpl(){const n=$("tplSel").value; if(!n||!confirm("قالب «"+n+"» حذف شود؟")) return; await api("/api/template/del","POST",{name:n}); loadTpl()}
+// ---- bulk creation
+async function doBulk(){
+  const b={prefix:$("bu_pf").value.trim(),count:$("bu_n").value,start:$("bu_s").value,d:$("bu_d").value,q:$("bu_q").value,l:$("bu_l").value,en:$("bu_en").value,tm:$("bu_ex").value==="B"?"tunnel":"direct",pw:$("bu_pw").value};
+  if(!b.prefix){alert("پیشوند نام را وارد کن");return}
+  if(!confirm(b.count+" اکانت با پیشوند "+b.prefix+" ساخته شود؟")) return;
+  $("bkRes").innerHTML="⏳ در حال ساخت...";
+  const r=await api("/api/user/bulk","POST",b);
+  if(!r.ok){$("bkRes").innerHTML="";alert(r.msg||"Error");return}
+  const host=location.hostname, lines=r.created.map(x=>x.u+"\t"+x.pw), txt="user\tpassword\n"+lines.join("\n");
+  $("bkRes").innerHTML=`<div style="color:var(--ok);margin-bottom:.4rem">✅ ${r.created.length} اکانت ساخته شد${r.errors.length?` · <span style="color:var(--er)">${r.errors.length} خطا</span>`:""}</div>
+    <textarea id="bkOut" rows="6" dir="ltr" readonly>${esc(txt)}</textarea>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap"><button class="btn btn-s" onclick="bulkCopy()">📋 کپی</button><button class="btn btn-s btn-o" onclick="bulkDl()">⬇️ دانلود CSV</button></div>
+    ${r.errors.length?`<div style="font-size:.78rem;color:var(--er);margin-top:.4rem">${r.errors.map(e=>esc(e.u+": "+e.msg)).join("<br>")}</div>`:""}`;
+  window._bulk=r.created; load(1);
+}
+function bulkCopy(){const t=$("bkOut").value; if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(()=>alert("Copied!"),()=>prompt("Copy:",t)); else prompt("Copy:",t)}
+function bulkDl(){
+  const rows=["user,password,host"].concat((window._bulk||[]).map(x=>x.u+","+x.pw+","+location.hostname));
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"})); a.download="ckvpn-accounts.csv"; document.body.appendChild(a); a.click(); a.remove();
+}
+// ---- subscription link + QR
+let subUrl="";
+async function subU(u){
+  const x=ul.find(i=>i.u===u); if(!x||!x.st){alert("لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن");return}
+  subUrl=location.origin+"/s/"+x.st; $("subTit").innerText=u; $("subLink").innerText=subUrl; $("subQr").innerHTML="⏳";
+  $("subBox").classList.remove("hid");
+  try{const r=await fetch("/api/qr?u="+encodeURIComponent(u),{headers:{"Authorization":"Bearer "+tok}}); const t=await r.text(); $("subQr").innerHTML=t.indexOf("<svg")>=0?t:"<div style='color:#555;font-size:.8rem'>QR در دسترس نیست</div>"}catch(e){$("subQr").innerHTML=""}
+  const sv=$("subQr").querySelector("svg"); if(sv){sv.setAttribute("width","100%");sv.removeAttribute("height")}
+}
+function subCopy(){if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(subUrl).then(()=>alert("Copied!"),()=>prompt("Copy:",subUrl)); else prompt("Copy:",subUrl)}
+// ---- statistics
+function fmtB(n){n=+n||0; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1024&&i<4){n/=1024;i++} return (i?n.toFixed(i>2?2:1):n.toFixed(0))+" "+u[i]}
+function cvs(id,h){const c=$(id), dpr=window.devicePixelRatio||1, w=c.clientWidth||300; c.width=w*dpr; c.height=h*dpr; c.style.height=h+"px"; const x=c.getContext("2d"); x.scale(dpr,dpr); x.direction="ltr"; x.textAlign="left"; return [x,w,h]}
+function hours(x,w,h,cut,col){x.fillStyle=col; x.font="10px sans-serif"; for(let i=0;i<=4;i++){x.textAlign=i===0?"left":(i===4?"right":"center"); x.fillText(new Date((cut+i*21600)*1000).getHours()+":00",25+i*(w-30)/4,h-2)} x.textAlign="left"}
+async function loadHist(){
+  let d; try{d=await api("/api/history")}catch(e){return}
+  const S=d.s||[], now=Date.now()/1000, cut=now-86400, pts=S.filter(r=>r[0]>=cut);
+  const css=getComputedStyle(document.documentElement), C=n=>css.getPropertyValue(n).trim()||"#888";
+  // tunnel
+  let [x,w,h]=cvs("cTun",130); const T=r=>(r[0]-cut)/86400*(w-30)+25;
+  x.fillStyle=C("--mu"); x.font="10px sans-serif"; x.fillText("ms",0,10);
+  const tun=pts.filter(r=>r[1]>=0), ups=tun.filter(r=>r[1]===1).length, mx=Math.max(20,...tun.map(r=>r[2]||0));
+  tun.forEach(r=>{if(r[1]===0){x.fillStyle="rgba(239,68,68,.35)"; x.fillRect(T(r)-1,0,Math.max(2,(w-30)/1440),h-14)}});
+  x.strokeStyle=C("--pr"); x.lineWidth=1.5; x.beginPath(); let st=false;
+  tun.forEach(r=>{if(r[1]===1){const X=T(r),Y=h-16-(r[2]/mx)*(h-30); if(!st){x.moveTo(X,Y);st=true}else x.lineTo(X,Y)}else st=false}); x.stroke();
+  hours(x,w,h,cut,C("--mu")); x.fillStyle=C("--mu"); x.fillText(mx.toFixed(0),0,22);
+  $("hTunSum").innerText=tun.length?`دسترس‌پذیری ۲۴ ساعت: ${(100*ups/tun.length).toFixed(1)}٪ · میانگین تأخیر: ${(tun.filter(r=>r[1]===1).reduce((a,r)=>a+r[2],0)/Math.max(1,ups)).toFixed(0)} ms · ${tun.length-ups} نمونه قطع`:"تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).";
+  // load
+  [x,w,h]=cvs("cLoad",110); const L=(i,col)=>{x.strokeStyle=col; x.lineWidth=1.5; x.beginPath(); pts.forEach((r,k)=>{const X=(r[0]-cut)/86400*(w-30)+25, Y=h-16-(Math.min(100,r[i])/100)*(h-30); k?x.lineTo(X,Y):x.moveTo(X,Y)}); x.stroke()};
+  x.fillStyle=C("--mu"); x.font="10px sans-serif"; x.fillText("100%",0,12); x.fillText("0",8,h-14); L(3,C("--pr")); L(4,C("--wn"));
+  hours(x,w,h,cut,C("--mu"));
+  // daily traffic
+  const days=Object.keys(d.d||{}).sort(), tot=days.map(k=>Object.values(d.d[k]).reduce((a,b)=>a+b,0));
+  [x,w,h]=cvs("cDay",150); const m2=Math.max(1,...tot), bw=(w-10)/Math.max(1,days.length);
+  x.font="10px sans-serif"; days.forEach((k,i)=>{const bh=(tot[i]/m2)*(h-34); x.fillStyle=C("--pr"); x.fillRect(5+i*bw+3,h-18-bh,bw-6,bh); x.fillStyle=C("--mu"); x.fillText(k.slice(5),5+i*bw+2,h-4); if(tot[i]>0){x.fillStyle=C("--tx"); x.fillText(fmtB(tot[i]),5+i*bw+2,h-22-bh)}});
+  if(!days.length){x.fillStyle=C("--mu"); x.fillText("هنوز داده‌ای ثبت نشده",10,20)}
+  // top users (7 days)
+  const agg={}; days.slice(-7).forEach(k=>Object.entries(d.d[k]).forEach(([u,b])=>agg[u]=(agg[u]||0)+b));
+  const top=Object.entries(agg).sort((a,b)=>b[1]-a[1]).slice(0,10), mt=top.length?top[0][1]:1;
+  $("hTop").innerHTML=top.length?`<table><tbody>${top.map(([u,b])=>`<tr><td><b>${esc(u)}</b></td><td style="width:55%"><div style="height:8px;border-radius:99px;background:#080c17"><div style="height:100%;width:${Math.max(2,100*b/mt)}%;border-radius:99px;background:var(--pr)"></div></div></td><td dir="ltr">${fmtB(b)}</td></tr>`).join("")}</tbody></table>`:"داده‌ای ثبت نشده";
+}
 async function tunTest(){const r=await api("/api/tunnel/test","POST",{}); alert(r.ok?("تانل سالم است. IP خروجی: "+r.ip):(r.msg||"Error")); loadTun()}
 async function tunRestart(){const r=await api("/api/tunnel/restart","POST",{}); alert(r.ok?"ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین":(r.msg||"Error")); loadTun()}
 async function tunRemove(){
@@ -1862,9 +2594,10 @@ async function tunRemove(){
   const r=await api("/api/tunnel/remove","POST",{});
   alert(r.ok?("تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: "+(r.converted||0)):(r.msg||"Error")); load(1); loadTun();
 }
-if(tok){$("lBox").classList.add("hid");load(1)}
+if(tok){$("lBox").classList.add("hid");load(1);loadTpl().catch(()=>{})}
 setInterval(()=>{if(tok&&$("lBox").classList.contains("hid"))load(0)},4000);
 setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secT").classList.contains("hid"))loadTun()},2000);
+setInterval(()=>{if(tok&&$("lBox").classList.contains("hid")&&!$("secH").classList.contains("hid"))loadHist()},60000);
 </script>
 </body>
 </html>

@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.5.0 — Security, backups, Telegram, bulk accounts, subscription links, statistics
+
+### 1. HTTPS and forced password change
+- The panel is served over **HTTPS on the same port 2053** (self-signed certificate created automatically, TLS 1.2+). Plain `http://` requests are redirected to `https://`, so old bookmarks keep working. You can upload your own certificate + key in Settings (it is checked before it is activated).
+- With the default `admin/admin` the whole API is locked until a new password (8+ characters, not "admin") is set in a forced dialog.
+
+### 2. Encrypted backup and restore (Settings)
+- One file with users (incl. password hashes and expiry), quota/usage, ports, tunnel configuration and SSH key, Telegram settings, templates and history, encrypted with a passphrase you choose (PBKDF2 + Fernet). Wrong passphrase or a damaged file is refused. Restore re-creates missing Linux accounts, restores everything, re-applies routing/tunnel and restarts the panel.
+
+### 3. Passwords encrypted at rest
+- Passwords the panel displays are stored encrypted (Fernet) with a key in a separate root-only file; existing plaintext entries are migrated automatically on start. The Telegram token and backup passphrase are encrypted too.
+
+### 4. Telegram
+- Settings: bot token, chat id (with a "find chat id" helper), alert switches, daily backup hour. Alerts: tunnel down/up, quota 90% / full, account expiring (3 days) / expired, CPU/RAM high for 3 minutes (no repeated spam). Daily encrypted backup to the chat. Bot commands (only from the configured chat): `/status /users /online /backup`.
+- Telegram is often blocked: the panel tries the direct path first and automatically falls back to the tunnel (and remembers what worked).
+
+### 5. Templates and bulk creation
+- Save the create form as a template and apply it later. "Bulk creation": prefix + count (1–200) + template-like fields + In/Out; random passwords (or one shared password); result can be copied or downloaded as CSV; name collisions are reported per account.
+
+### 6. Subscription link and QR
+- Every account has a secret link (`/s/<token>`) — a public, login-free page with expiry, usage, connection info (host/ports follow the account's In/Out and port mapping), an `ssh://` link and a QR code. Wrong tokens are rate-limited per IP. The 🔗 button shows the QR and copies the link.
+
+### 7. Statistics tab
+- Every minute the panel records tunnel state + latency, CPU/RAM and per-user traffic. The tab draws tunnel availability/latency (24 h), server load (24 h), daily traffic (14 days) and the top users (7 days).
+
+### Notes
+- New packages are installed by `install.sh`: `python3-cryptography`, `python3-qrcode`, `openssl`. If they are missing the panel still runs (without encryption/backup/QR) and says so in Settings.
+- The encryption key lives on the same server: it protects copies of the files and the backups, not a compromised root.
+- With the self-signed certificate the browser warns once; the subscription link opens with the same warning unless you install a real certificate.
+- Tested in the two-server lab (HTTPS, forced change, encryption + migration, backup/restore incl. wrong passphrase and a deleted user, Telegram against a stand-in Bot API incl. the tunnel fallback with the direct path blocked, alerts without repetition, templates/bulk, subscription page + rate limit, history with real traffic, full UI in a browser). Not covered: the real Telegram servers, Let's Encrypt, real `badvpn-udpgw`, real systemd, IPv6.
+
 ## v1.4.0 — Port coordination and firewalls on both servers
 
 ### What the check found (and fixed)
