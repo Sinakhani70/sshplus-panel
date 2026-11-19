@@ -3,6 +3,8 @@ Description=SSH Plus Tunnel (link to the exit server)
 After=network-online.target sshplus-tunnel-net.service
 Wants=network-online.target sshplus-tunnel-net.service
 StartLimitIntervalSec=0
+# no configuration = no restart loop
+ConditionPathExists=/etc/SSHPlus/tunnel.conf
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/start-tunnel.sh

@@ -1,5 +1,7 @@
 #!/bin/bash
-[ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf || { echo "tunnel.conf missing"; exit 1; }
+F=/etc/SSHPlus/tunnel.conf
+[ -f "$F" ] || { echo "SSHPLUS-TUNNEL: $F is missing (the tunnel was removed or its setup failed)"; exit 1; }
+. "$F" || { echo "SSHPLUS-TUNNEL: $F could not be read"; exit 1; }
 : "${TUN_DEV:=tun99}" "${TUN_ID:=99}" "${TUN_REMOTE:=10.99.0.2}"
 O=(-F /dev/null -i /etc/SSHPlus/tunnel_key -p "$TUN_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes
    -o UserKnownHostsFile=/etc/SSHPlus/tunnel_known_hosts -o GlobalKnownHostsFile=/dev/null

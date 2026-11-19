@@ -387,7 +387,9 @@ chmod 755 /usr/local/bin/sshplus-tunnel-net
 # ---- Tunnel: SSH tun link to the exit server (L3 tunnel over ssh -w) ----
 cat > /usr/local/bin/start-tunnel.sh <<'EOF'
 #!/bin/bash
-[ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf || { echo "tunnel.conf missing"; exit 1; }
+F=/etc/SSHPlus/tunnel.conf
+[ -f "$F" ] || { echo "SSHPLUS-TUNNEL: $F is missing (the tunnel was removed or its setup failed)"; exit 1; }
+. "$F" || { echo "SSHPLUS-TUNNEL: $F could not be read"; exit 1; }
 : "${TUN_DEV:=tun99}" "${TUN_ID:=99}" "${TUN_REMOTE:=10.99.0.2}"
 O=(-F /dev/null -i /etc/SSHPlus/tunnel_key -p "$TUN_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes
    -o UserKnownHostsFile=/etc/SSHPlus/tunnel_known_hosts -o GlobalKnownHostsFile=/dev/null
@@ -628,6 +630,8 @@ Description=SSH Plus Tunnel (link to the exit server)
 After=network-online.target sshplus-tunnel-net.service
 Wants=network-online.target sshplus-tunnel-net.service
 StartLimitIntervalSec=0
+# no configuration = no restart loop
+ConditionPathExists=/etc/SSHPlus/tunnel.conf
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/start-tunnel.sh
