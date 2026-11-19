@@ -415,6 +415,35 @@ Started sshplus-tunnel.service - SSH Plus Tunnel (link to the exit server)."""
         self.assertEqual(app.tun_diag("Started sshplus-tunnel.service - x\nsshplus-tunnel.service: Failed with result 'exit-code'.")[0], "")
 
 
+class TunnelProbe(unittest.TestCase):
+    def setUp(self):
+        import socket, threading
+        self.old = (app.cmd, app.TUN_LOCAL, app.TUN_REMOTE, app.tconf, dict(app._TP))
+        self.srv = socket.socket(); self.srv.bind(("127.0.0.1", 0)); self.srv.listen(5); self.port = self.srv.getsockname()[1]
+        threading.Thread(target=lambda: [self.srv.accept() for _ in range(5)], daemon=True).start()
+        app.TUN_LOCAL = "127.0.0.1"; app.TUN_REMOTE = "127.0.0.1"; app.tconf = lambda: {"TUN_PORT": str(self.port)}; app._TP["t"] = 0.0
+
+    def tearDown(self):
+        app.cmd, app.TUN_LOCAL, app.TUN_REMOTE, app.tconf = self.old[:4]; app._TP.update(self.old[4]); self.srv.close()
+
+    def test_icmp_is_used_when_it_works(self):
+        app.cmd = lambda c, *a, **k: (0, "64 bytes from x: time=1.5 ms", "")
+        self.assertEqual(app.tun_probe(True), (True, 1.5))
+
+    def test_blocked_ping_falls_back_to_tcp(self):
+        app.cmd = lambda c, *a, **k: (1, "", "")                                   # the exit server drops ICMP echo
+        ok, ms = app.tun_probe(True); self.assertTrue(ok); self.assertGreaterEqual(ms, 0)
+
+    def test_down_when_neither_works(self):
+        app.cmd = lambda c, *a, **k: (1, "", ""); app.tconf = lambda: {"TUN_PORT": "1"}
+        self.assertEqual(app.tun_probe(True), (False, 0.0))
+
+    def test_result_is_cached_for_a_few_seconds(self):
+        n = []
+        app.cmd = lambda c, *a, **k: (n.append(1) or (0, "time=2 ms", ""))
+        app.tun_probe(True); app.tun_probe(); app.tun_probe(); self.assertEqual(len(n), 1)
+
+
 class Translations(unittest.TestCase):
     """the English UI: every Persian key must have a non-empty English value and sane placeholders"""
     def test_dictionary_shape(self):
