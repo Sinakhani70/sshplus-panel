@@ -532,7 +532,7 @@ def tunnel_status(full=False):
      "rev_map":[{"a":int(a),"b":int(b)} for a,b in (x.split(":",1) for x in c.get("REV_MAP","").split(",") if ":" in x) if a.isdigit() and b.isdigit()]}
   if full:
     if up:
-      r["up"]=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0
+      r["up"]=tun_probe()[0]
     r["tdb"]=rjson(PORTS,{}).get("tdb",[]); r["users"]=tun_users(); r["setup"]=ts_snap()
   return r
 
@@ -575,6 +575,21 @@ def tun_exit_ip():
     rc,o,_=cmd(["curl","-s","--max-time","8","--interface",TUN_LOCAL,u],12)
     if rc==0 and IP_RE.match(o.strip()): return o.strip()
   return ""
+
+_TP={"t":0.0,"v":(False,0.0)}
+def tun_probe(force=False):
+  # (is data passing through the tunnel, round-trip ms). ICMP first; many exit servers drop ping (firewall), so a TCP connect to its
+  # SSH port through the tunnel counts just as well. Cached for a few seconds: the Tunnel tab polls and a connect per poll would be noise.
+  if not force and time.time()-_TP["t"]<10: return _TP["v"]
+  rc,o,_=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)
+  if rc==0:
+    m=re.search(r"time=([\d.]+)",o); v=(True,float(m.group(1)) if m else 0.0)
+  else:
+    port=to_port(tconf().get("TUN_PORT",22)) or 22; t0=time.time(); v=(False,0.0)
+    try:
+      sk=socket.socket(); sk.settimeout(3); sk.bind((TUN_LOCAL,0)); sk.connect((TUN_REMOTE,port)); sk.close(); v=(True,round((time.time()-t0)*1000,1))
+    except Exception: pass
+  _TP["t"]=time.time(); _TP["v"]=v; return v
 
 def tun_local_check():
   # can this server open /dev/net/tun? returns "" or the reason
@@ -670,7 +685,7 @@ def tunnel_setup_run(host,port,user,pw):
   def f_wait():
     for _ in range(40):
       if cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0 and \
-         cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0:
+         tun_probe(True)[0]:
         return True,f"{TUN_LOCAL} <-> {TUN_REMOTE}"
       time.sleep(1)
     _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","60","--no-pager","-o","cat"],10)
@@ -679,7 +694,7 @@ def tunnel_setup_run(host,port,user,pw):
     # the link may be up while nothing passes through it: collect what both ends look like (the key login works at this point)
     act=cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0
     if act:
-      pg=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6); pl=[x for x in (pg[1]+"\n"+pg[2]).splitlines() if x.strip()][-1:]
+      pg=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6); pl=[x for x in (pg[1]+"\n"+pg[2]).splitlines() if x.strip()][-1:]+["tcp:"+("ok" if tun_probe(True)[0] else "fail")]
       loc=cmd(["ip","-br","addr","show",TUN_DEV])[1] or "no "+TUN_DEV
       rem=_run(["ssh"]+_ssh_o(port)+[tgt,"ip -br addr show %s 2>&1; ufw status 2>/dev/null | head -1; iptables -S INPUT 2>/dev/null | head -3"%TUN_DEV],t=30)[1]
       extra+="\nلینک SSH برقرار است ولی داخل تانل ping جواب نمی‌دهد / the SSH link is up but nothing passes: local: %s | ping: %s | exit server: %s"%(loc," ".join(pl),rem.replace("\n"," / ")[:240])
@@ -828,7 +843,7 @@ def tunnel_restart():
 
 def tunnel_test():
   if not tconf().get("TUN_HOST"): return 400,{"ok":0,"msg":"Tunnel is not set up"}
-  if cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]!=0: return 200,{"ok":0,"msg":"Tunnel link is down"}
+  if not tun_probe(True)[0]: return 200,{"ok":0,"msg":"Tunnel link is down"}
   ip=tun_exit_ip()
   if not ip: return 200,{"ok":0,"msg":"Link is up but there is no internet through the tunnel"}
   c=tconf(); c["EXIT_IP"]=ip; tconf_write(c)
@@ -1745,10 +1760,7 @@ def res_now():
   except Exception: mem=0.0
   up=-1; rtt=0
   if tconf().get("TUN_HOST"):
-    rc,o,_=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)
-    up=1 if rc==0 else 0
-    m=re.search(r"time=([\d.]+)",o)
-    if m: rtt=float(m.group(1))
+    ok,ms=tun_probe(); up=1 if ok else 0; rtt=ms
   return {"t":int(time.time()),"up":up,"rtt":rtt,"cpu":cpu,"mem":mem}
 
 def hist_tick():
