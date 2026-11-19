@@ -1,0 +1,10 @@
+[Unit]
+Description=SSH Plus tunnel routing rules (fail-closed)
+Before=ssh.service sshd.service sshplus-dropbear-t.service badvpn-t.service
+After=local-fs.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sshplus-tunnel-net boot
+[Install]
+WantedBy=multi-user.target

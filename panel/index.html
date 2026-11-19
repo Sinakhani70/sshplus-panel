@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CK.VPN</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%2306b6d4'/%3E%3Ctext x='24' y='31' text-anchor='middle' font-family='Arial' font-weight='800' font-size='19' fill='white'%3ECK%3C/text%3E%3C/svg%3E">
+<style>
+:root{--bg:#0b1120;--card:#111827;--bd:#1f2937;--tx:#f3f4f6;--mu:#9ca3af;--pr:#06b6d4;--ok:#10b981;--er:#ef4444;--wn:#f59e0b}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,Tahoma,sans-serif}
+body{background:var(--bg);color:var(--tx);padding:1rem;max-width:1280px;margin:auto}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1.1rem;margin-bottom:1rem}
+.g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:.75rem;margin-bottom:1rem}
+.g2{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:1rem;margin-bottom:1rem}
+textarea{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem;font-family:monospace;font-size:.75rem}
+input,select{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem}
+label{font-size:.8rem;color:var(--mu)}
+.btn{background:var(--pr);color:#031116;border:none;padding:.55rem 1rem;border-radius:8px;font-weight:700;cursor:pointer}
+.btn-s{padding:.35rem .65rem;font-size:.8rem}.btn-e{background:var(--er);color:#fff}.btn-w{background:var(--wn);color:#000}.btn-o{background:var(--ok);color:#03130c}
+.tab-bar{display:flex;gap:.6rem;margin-bottom:1rem;border-bottom:1px solid var(--bd);padding-bottom:.75rem}
+.tab-btn{background:var(--card);color:var(--mu);border:1px solid var(--bd);padding:.6rem 1.2rem;border-radius:10px;font-weight:700;cursor:pointer;flex:1;text-align:center}
+.tab-btn.act{background:rgba(6,182,212,.15);color:var(--pr);border-color:var(--pr)}
+.bdg{padding:.2rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700;display:inline-block;max-width:100%;overflow-wrap:anywhere}
+.ok{background:rgba(16,185,129,.15);color:var(--ok)}.er{background:rgba(239,68,68,.15);color:var(--er)}.wn{background:rgba(245,158,11,.15);color:var(--wn)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;text-align:start;border-bottom:1px solid var(--bd)}
+.hid{display:none!important}.modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;padding:1rem;z-index:99}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.5rem}
+</style>
+</head>
+<body>
+<div id="lBox" class="modal"><div class="card" style="width:100%;max-width:350px">
+  <div style="text-align:end;margin:-.2rem 0 .2rem"><button class="btn btn-s langBtn" onclick="toggleLang()" title="Language / زبان">EN</button></div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>
+  <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
+  <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
+  <button class="btn" style="width:100%" onclick="login()">ورود / Login</button>
+</div></div>
+
+<div id="fpBox" class="modal hid" style="z-index:120"><div class="card" style="width:100%;max-width:380px">
+  <h3 style="color:var(--wn);margin-bottom:.6rem">🔐 تغییر رمز پیش‌فرض</h3>
+  <div style="font-size:.82rem;color:var(--mu);margin-bottom:.7rem;line-height:1.8">رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).</div>
+  <label>رمز جدید</label><input id="fp1" type="password" autocomplete="new-password" autocapitalize="none">
+  <label>تکرار رمز</label><input id="fp2" type="password" autocomplete="new-password" autocapitalize="none" onkeydown="if(event.key==='Enter')saveFp()">
+  <button class="btn" style="width:100%" onclick="saveFp()">ذخیره و ادامه</button>
+</div></div>
+
+<div id="subBox" class="modal hid"><div class="card" style="width:100%;max-width:360px;text-align:center">
+  <h3 id="subTit" style="margin-bottom:.4rem"></h3>
+  <div id="subQr" style="background:#fff;border-radius:12px;padding:10px;max-width:240px;margin:.5rem auto"></div>
+  <textarea id="subLink" rows="2" dir="ltr" readonly style="font-size:.7rem;margin:.3rem 0" onclick="this.select()"></textarea>
+  <div style="display:flex;gap:.35rem;justify-content:center;flex-wrap:wrap">
+    <button class="btn btn-s" onclick="copyText(subUrl)">📋 لینک اشتراک (برای برنامه‌ها)</button>
+    <button class="btn btn-s" onclick="copyText(subUrl+'?fmt=plain')">📋 متن ساده</button>
+    <button class="btn btn-s btn-o" onclick="copyText(subSsh[0]||'')">📋 لینک SSH</button>
+    <button class="btn btn-s btn-o" onclick="copyText(subSshB[0]||'')">📋 لینک SSH (base64)</button>
+    <button class="btn btn-s btn-w" onclick="window.open(subUrl+'?fmt=html')">🔗 باز کردن صفحه</button>
+    <button class="btn btn-s btn-e" onclick="$('subBox').classList.add('hid')">بستن</button>
+  </div>
+  <div style="font-size:.7rem;color:var(--mu);margin-top:.5rem;line-height:1.7">اگر برنامه‌ی تانل لینک را نپذیرفت، یکی از حالت‌های دیگر را امتحان کن. برنامه‌هایی که گواهی self-signed را رد می‌کنند به گواهی معتبر نیاز دارند، یا لینک اشتراک را روی HTTP ساده فعال کن (تنظیمات ← HTTPS).</div>
+</div></div>
+
+<div id="eBox" class="modal hid"><div class="card" style="width:100%;max-width:420px">
+  <h3 id="eTit" style="color:var(--pr);margin-bottom:.8rem">ویرایش کاربر</h3>
+  <input type="hidden" id="eu">
+  <label>رمز جدید (خالی = بدون تغییر)</label><input id="epw" autocapitalize="none">
+  <div style="display:flex;gap:.5rem">
+    <div style="flex:1"><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="een" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+    <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+  </div>
+  <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
+  <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
+  <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
+  <div style="display:flex;gap:.5rem">
+    <div style="flex:1"><label>حجم (GB | 0=نامحدود)</label><input id="eq" type="number" step="0.5" min="0"></div>
+    <div style="flex:1"><label>کاربر همزمان</label><input id="el" type="number" min="1"></div>
+  </div>
+  <label>تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر</label><input id="ed" type="number" min="0" placeholder="0">
+  <label style="display:flex;align-items:center;gap:.4rem;margin-bottom:.8rem;color:var(--wn)"><input type="checkbox" id="erst" style="width:auto;margin:0"> صفر کردن ترافیک مصرفی</label>
+  <div style="display:flex;gap:.5rem"><button class="btn" style="flex:1" onclick="saveUser(1)">ذخیره</button><button class="btn btn-e" onclick="$('eBox').classList.add('hid')">بستن</button></div>
+</div></div>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;flex-wrap:wrap;gap:.5rem">
+  <div style="display:flex;align-items:center;gap:.7rem"><svg width="42" height="42" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg1)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><div><h2 style="line-height:1.1;letter-spacing:.5px">CK.VPN <span id="ver" class="bdg ok" style="font-size:.62rem;vertical-align:middle;letter-spacing:0" dir="ltr" title="Panel version">v__VERSION__</span></h2><div style="font-size:.72rem;color:var(--mu)">SSH · Dropbear · BadVPN · Tunnel</div></div></div>
+  <div>
+    <button class="btn btn-s langBtn" onclick="toggleLang()" title="Language / زبان">EN</button>
+    <button class="btn btn-s" onclick="load(1)">🔄</button>
+    <button class="btn btn-s btn-e" onclick="localStorage.removeItem('tok');location.reload()">Logout</button>
+  </div>
+</div>
+
+<div class="tab-bar">
+  <button id="bTabU" class="tab-btn act" onclick="swTab('u')">👥 کاربران</button>
+  <button id="bTabT" class="tab-btn" onclick="swTab('t')">🌐 تانل</button>
+  <button id="bTabH" class="tab-btn" onclick="swTab('h')">📈 آمار</button>
+  <button id="bTabS" class="tab-btn" onclick="swTab('s')">⚙️ تنظیمات سرور</button>
+</div>
+
+<div id="secU">
+  <div class="card" style="border-color:var(--pr);font-size:.88rem"><strong>🔌 پورت‌های فعال: </strong><span id="pBan">--</span></div>
+  <div class="g4">
+    <div class="card"><label>آنلاین / کل کاربران</label><h2 id="stU">0 / 0</h2></div>
+    <div class="card"><label>Dropbear</label><div id="stDb" style="margin-top:.3rem">--</div></div>
+    <div class="card"><label>BadVPN</label><div id="stBv" style="margin-top:.3rem">--</div></div>
+    <div class="card"><label>تانل / Dropbear تانل</label><div id="stTn" style="margin-top:.3rem">--</div></div>
+    <div class="card"><label>BBR / منابع</label><div id="stBbr" style="margin-top:.2rem">--</div><div id="stRes" style="font-size:.78rem;color:var(--mu);margin-top:.2rem">--</div></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.7rem">➕ ساخت کاربر جدید</h3>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
+      <label style="margin:0">قالب:</label>
+      <select id="tplSel" style="width:auto;margin:0;min-width:150px" onchange="applyTpl()"><option value="">— بدون قالب —</option></select>
+      <button class="btn btn-s btn-o" onclick="saveTpl()">💾 ذخیره فرم به‌عنوان قالب</button>
+      <button class="btn btn-s btn-e" onclick="delTpl()">🗑️</button>
+    </div>
+    <div class="row">
+      <div><label>نام کاربری (انگلیسی)</label><input id="nu" placeholder="user1" autocapitalize="none"></div>
+      <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
+      <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
+      <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
+      <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
+      <div><label>کاربر همزمان</label><input id="nl" type="number" value="1" min="1"></div>
+    </div>
+    <div id="nHint" style="font-size:.8rem;color:var(--mu);margin:.2rem 0 .7rem;line-height:1.8"></div>
+    <button class="btn" onclick="saveUser(0)">ایجاد اکانت</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.7rem">📦 ساخت دسته‌ای اکانت</h3>
+    <div class="row">
+      <div><label>پیشوند نام</label><input id="bu_pf" placeholder="cust" autocapitalize="none"></div>
+      <div><label>تعداد (۱ تا ۲۰۰)</label><input id="bu_n" type="number" value="10" min="1" max="200"></div>
+      <div><label>شروع شماره</label><input id="bu_s" type="number" value="1" min="0"></div>
+      <div><label>روز اعتبار</label><input id="bu_d" type="number" value="30" min="1"></div>
+      <div><label>حجم (GB | 0=نامحدود)</label><input id="bu_q" type="number" value="0" min="0" step="0.5"></div>
+      <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
+      <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
+      <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
+      <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
+    </div>
+    <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
+    <div id="bkRes" style="margin-top:.7rem"></div>
+  </div>
+
+  <div class="card" style="overflow-x:auto">
+    <h3>📋 لیست کاربران</h3>
+    <table>
+      <thead><tr><th>User / Pass</th><th dir="ltr">In → Out</th><th>Port</th><th>Online / Limit</th><th>Traffic</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="tb"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="secT" class="hid">
+  <div class="g2">
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🌐 وضعیت تانل</h3>
+      <div id="tnStat" style="margin-bottom:.7rem">--</div>
+      <div id="tnInfo" style="font-size:.85rem;line-height:1.9"></div>
+      <div id="tnBtns" class="hid" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.8rem">
+        <button class="btn btn-s btn-o" onclick="tunTest()">🔍 تست خروجی</button>
+        <button class="btn btn-s btn-w" onclick="tunRestart()">🔄 ری‌استارت تانل</button>
+        <button class="btn btn-s btn-e" onclick="tunRemove()">🗑️ حذف تانل</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 نصب و اتصال تانل (یک کلیک)</h3>
+      <label>IP یا دامنه‌ی سرور جدید (خروجی)</label><input id="tnH" placeholder="1.2.3.4" autocapitalize="none" autocorrect="off">
+      <div style="display:flex;gap:.5rem">
+        <div style="flex:1"><label>پورت SSH</label><input id="tnP" type="number" value="22"></div>
+        <div style="flex:1"><label>کاربر (باید root باشد)</label><input id="tnU" value="root" autocapitalize="none"></div>
+      </div>
+      <label>رمز SSH سرور جدید</label><input id="tnW" type="password" autocomplete="off" autocapitalize="none">
+      <button id="tnGo" class="btn" style="width:100%" onclick="tunSetup()">⚡ نصب و برقراری تانل</button>
+      <div data-th="tnNote" style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.7">رمز فقط برای نصب کلید SSH استفاده می‌شود و ذخیره نمی‌شود؛ بعد از آن ارتباط با کلید است.<br>
+      ⚠️ اگر نمی‌خواهی رمز سرور را در صفحه‌ی وب تایپ کنی، در ترمینال همین سرور بزن:<br><code dir="ltr">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code></div>
+    </div>
+  </div>
+  <div class="card hid" id="tnBiBox">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">↔️ مسیر دوطرفه (همیشه فعال)</h3>
+    <div id="tnBi" style="font-size:.85rem;line-height:1.9"></div>
+    <div style="font-size:.78rem;color:var(--mu);margin-top:.5rem;line-height:1.8" data-th="biNote">موقع ساخت اکانت، ادمین دو انتخاب <bdi dir="ltr"><b>In</b></bdi> و <bdi dir="ltr"><b>Out</b></bdi> دارد: <bdi dir="ltr"><b>In</b></bdi> یعنی کاربر به IP کدام سرور وصل شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی با IP کدام سرور به اینترنت برسد. هر چهار ترکیب (<span dir="ltr">1→1</span>، <span dir="ltr">1→2</span>، <span dir="ltr">2→1</span>، <span dir="ltr">2→2</span>) فعال است و UDPGW (بازی/تماس) روی همه‌ی آن‌ها کار می‌کند. نیازی به تنظیم مود جداگانه نیست.</div>
+  </div>
+  <div class="card hid" id="tnPortBox">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🔌 هماهنگی پورت‌ها و فایروال دو سرور</h3>
+    <div id="tnPorts" style="overflow-x:auto"></div>
+    <button class="btn btn-s" style="margin-top:.7rem" onclick="tunPorts()">🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور</button>
+    <div style="font-size:.75rem;color:var(--mu);margin-top:.5rem;line-height:1.8">اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.</div>
+  </div>
+  <div class="card" id="tnLogBox">
+    <h3 style="margin-bottom:.6rem">📜 مراحل نصب</h3>
+    <div id="tnLog" style="font-size:.85rem;line-height:1.9;color:var(--mu)">هنوز نصبی انجام نشده.</div>
+  </div>
+  <div class="card" style="font-size:.82rem;line-height:1.9;color:var(--mu)">
+    <h3 style="margin-bottom:.5rem;color:var(--tx)">ℹ️ نحوه‌ی کار</h3>
+    <div data-th="how">    <bdi dir="ltr"><b>In</b></bdi> یعنی سروری که کاربر به IP آن وصل می‌شود و <bdi dir="ltr"><b>Out</b></bdi> یعنی سروری که IP آن در اینترنت دیده می‌شود. «سرور ۱» همین سرور است و «سرور ۲» سرور تانل.<br>
+    ۱) وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد، ترافیک از داخل تانل می‌گذرد. این اکانت روی پورت‌های <b>SSH (OpenSSH)</b> و <b>Dropbear تانل</b> کار می‌کند؛ پورت‌های Dropbear معمولی فقط برای اکانت‌هایی‌اند که <bdi dir="ltr"><b>Out</b></bdi> آن‌ها «سرور ۱» است. پورت‌ها در تب تنظیمات قابل تغییرند.<br>
+    ۲) وقتی <bdi dir="ltr"><b>In</b></bdi> روی «سرور ۲» باشد، پورت‌های این سرور روی سرور ۲ باز می‌شوند و از داخل تانل به این سرور فوروارد می‌شوند. پورت ۲۲ و هر پورتی که سرور ۲ خودش رویش گوش می‌دهد هرگز دست نمی‌خورد؛ پس دسترسی ادمین به هر دو سرور و به پنل همیشه باز می‌ماند. فایروال سرور ۲ باید این پورت‌ها را باز کند و IP واقعی کاربر روی این سرور دیده نمی‌شود.<br>
+    ۳) اگر تانل قطع شود، هر مسیری که از تانل می‌گذرد <b>بسته</b> می‌شود (به‌جای نشت از IP مستقیم). برقراری مجدد خودکار است.<br>
+    ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند. وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد از تانل می‌گذرد. کلاینت همان <span dir="ltr">127.0.0.1:7300</span> را استفاده می‌کند.<br>
+    ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.</div>
+  </div>
+</div>
+
+<div id="secH" class="hid">
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🌐 وضعیت تانل (۲۴ ساعت گذشته)</h3>
+    <div id="hTunSum" style="font-size:.82rem;color:var(--mu);margin-bottom:.4rem"></div><canvas id="cTun" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده</div></div>
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🖥️ بار سرور (۲۴ ساعت)</h3><canvas id="cLoad" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">آبی: CPU · نارنجی: RAM</div></div>
+  <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">📊 مصرف روزانه‌ی کل (۱۴ روز)</h3><canvas id="cDay" style="width:100%;display:block"></canvas></div>
+  <div class="card" style="overflow-x:auto"><h3 style="margin-bottom:.4rem;color:var(--pr)">🏆 پرمصرف‌ترین کاربران (۷ روز)</h3><div id="hTop"></div></div>
+</div>
+
+<div id="secS" class="hid">
+  <div class="g2">
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 BBR (کنترل ازدحام TCP)</h3>
+      <div style="display:flex;gap:.5rem">
+        <div style="flex:1"><label>الگوریتم فعلی</label><input id="bbrCc" readonly></div>
+        <div style="flex:1"><label>Queue Discipline</label><input id="bbrQd" readonly></div>
+      </div>
+      <div id="bbrSt" style="margin-bottom:.7rem"></div>
+      <button id="bbrBtn" class="btn" onclick="toggleBbr()">--</button>
+      <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem">روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">👤 نام کاربری و رمز ادمین پنل</h3>
+      <label>نام کاربری ادمین</label><input id="au" autocapitalize="none" autocorrect="off">
+      <label>رمز جدید ادمین</label><input id="ap" type="text" placeholder="New Password" autocapitalize="none" autocorrect="off">
+      <button class="btn" onclick="saveAdm()">💾 ذخیره</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.7rem">🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)</h3>
+    <div id="sshAll" style="font-size:.8rem;color:var(--mu);margin-bottom:.6rem"></div>
+    <div class="row">
+      <div><label>پورت SSH دوم</label><input id="s2" type="number"></div>
+      <div><label>پورت SSH اصلی (پنل)</label><input id="s1" type="number"></div>
+    </div>
+    <div class="row">
+      <div><label>Dropbear 1</label><input id="d1" type="number"></div>
+      <div><label>Dropbear 2</label><input id="d2" type="number"></div>
+      <div><label>Dropbear 3</label><input id="d3" type="number"></div>
+      <div><label>Dropbear 4</label><input id="d4" type="number"></div>
+      <div><label>Dropbear 5</label><input id="d5" type="number"></div>
+      <div><label>Dropbear 6</label><input id="d6" type="number"></div>
+    </div>
+    <label style="display:block;margin:.4rem 0 .2rem">🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)</label>
+    <div class="row">
+      <div><label>Tunnel DB 1</label><input id="td1" type="number"></div>
+      <div><label>Tunnel DB 2</label><input id="td2" type="number"></div>
+      <div><label>Tunnel DB 3</label><input id="td3" type="number"></div>
+      <div><label>Tunnel DB 4</label><input id="td4" type="number"></div>
+    </div>
+    <button class="btn btn-s" onclick="savePorts()">ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)</button>
+    <h3 style="margin:1.2rem 0 .6rem">🎮 BadVPN UDPGW</h3>
+    <div class="row">
+      <div><label>پورت (TCP داخل تونل)</label><input id="bp" type="number"></div>
+      <div><label>UDP MTU</label><input id="bm" type="number"></div>
+      <div><label>Max Clients</label><input id="bc" type="number"></div>
+      <div><label>Max Conn / Client</label><input id="bn" type="number"></div>
+      <div><label>Bind</label><select id="bb"><option value="127.0.0.1">127.0.0.1 (امن)</option><option value="0.0.0.0">0.0.0.0 (عمومی)</option></select></div>
+    </div>
+    <button class="btn btn-s btn-w" onclick="saveBv()">ذخیره و ری‌استارت BadVPN</button>
+  </div>
+
+  <div class="g2">
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🔒 HTTPS و گواهی</h3>
+    <div id="certInfo" style="font-size:.78rem;color:var(--mu);white-space:pre-wrap;direction:ltr;text-align:left;margin-bottom:.6rem"></div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.2rem"><input type="checkbox" id="plainSub" style="width:auto;margin:.2rem 0 0" onchange="savePlainSub()"><span>اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)</span></label>
+    <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin:0 0 .8rem">⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.</div>
+    <label>گواهی (fullchain، فرمت PEM)</label><textarea id="certPem" rows="3" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+    <label>کلید خصوصی (PEM)</label><textarea id="certKey" rows="3" dir="ltr" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+    <button class="btn btn-s" onclick="saveCert()">آپلود گواهی</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">💾 بکاپ و بازیابی</h3>
+    <div id="bkWarn" style="font-size:.8rem;color:var(--wn);margin-bottom:.4rem"></div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.</div>
+    <label>پسفریز (حداقل ۶ کاراکتر)</label><input id="bkPass" type="password" autocomplete="off" autocapitalize="none">
+    <button class="btn btn-s btn-o" onclick="doBackup()">⬇️ دانلود بکاپ</button>
+    <label style="display:block;margin-top:.9rem">بازیابی از فایل بکاپ (.ckbk)</label><input id="bkFile" type="file" accept=".ckbk">
+    <button class="btn btn-s btn-w" onclick="doRestore()">⬆️ بازیابی (پنل ری‌استارت می‌شود)</button>
+  </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🤖 ربات و هشدار تلگرام</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem" data-th="tgNote">ابتدا در تلگرام با @BotFather یک ربات بساز و توکن را اینجا بگذار؛ بعد به ربات پیام <span dir="ltr">/start</span> بده و «پیدا کردن Chat ID» را بزن. اگر تلگرام از روی این سرور باز نمی‌شود، پنل خودکار از مسیر تانل می‌فرستد.</div>
+    <div class="row">
+      <div><label>توکن ربات <span id="tgSet" style="color:var(--ok)"></span></label><input id="tgToken" type="password" placeholder="123456:ABC..." autocomplete="off" autocapitalize="none"></div>
+      <div><label>Chat ID</label><input id="tgChat" autocapitalize="none" placeholder="123456789"></div>
+      <div><label>پسفریز بکاپ خودکار <span id="tgBp" style="color:var(--ok)"></span></label><input id="tgBpass" type="password" autocomplete="off" autocapitalize="none"></div>
+      <div><label>ساعت بکاپ روزانه (۰ تا ۲۳)</label><input id="tgHour" type="number" min="0" max="23" value="3"></div>
+    </div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:.85rem;margin-bottom:.8rem">
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_tunnel" style="width:auto;margin:0"> قطع/وصل تانل</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_quota" style="width:auto;margin:0"> ۹۰٪ و پر شدن حجم</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_expiry" style="width:auto;margin:0"> نزدیک/پایان انقضا</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_res" style="width:auto;margin:0"> فشار CPU/RAM</label>
+      <label style="display:flex;gap:.3rem;align-items:center;color:var(--tx)"><input type="checkbox" id="tgA_daily" style="width:auto;margin:0"> بکاپ روزانه به تلگرام</label>
+    </div>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+      <button class="btn btn-s" onclick="saveTg()">💾 ذخیره</button>
+      <button class="btn btn-s btn-o" onclick="tgTest()">📨 پیام آزمایشی</button>
+      <button class="btn btn-s btn-w" onclick="tgDetect()">🔎 پیدا کردن Chat ID</button>
+      <button class="btn btn-s btn-w" onclick="tgBackup()">💾 ارسال بکاپ همین حالا</button>
+    </div>
+    <div style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.8" data-th="tgCmd">دستورهای ربات (فقط از Chat ID تنظیم‌شده): <span dir="ltr">/status /users /online /backup</span></div>
+  </div>
+</div>
+
+<script>
+@@INCLUDE panel/ui.js@@
+</script>
+</body>
+</html>

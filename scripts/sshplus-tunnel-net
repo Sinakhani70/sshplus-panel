@@ -1,0 +1,117 @@
+#!/bin/bash
+# usage: sshplus-tunnel-net boot|base|mark|up|down|sync|clean
+# IPv4: tunnel accounts are routed into the tunnel. IPv6: tunnel accounts get an "unreachable" route
+# (the tunnel is IPv4-only), so they can never leave through this server's own IPv6 address.
+# UDPGW: tunnel accounts that connect to 127.0.0.1:UDP_PORT are transparently redirected to a second
+# badvpn instance (UDP_PORT+1) that itself runs in the tunnel routing path.
+TBL=100; MARK=0x64; PRIO_MARK=90; PRIO_SRC=91; PRIO_UID=100
+CGS="system.slice/sshplus-dropbear-t.service system.slice/badvpn-t.service"
+CG_DB="system.slice/sshplus-dropbear-t.service"
+UDP_PORT=7300
+[ -f /etc/SSHPlus/badvpn.conf ] && . /etc/SSHPlus/badvpn.conf
+TUDP=$((UDP_PORT+1))
+TUN_DEV=tun99; TUN_LOCAL=10.99.0.1
+[ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf
+V6=0; [ -s /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1 && V6=1
+ipt() { local t=$1 c=$2; shift 2; iptables -t "$t" -C "$c" "$@" 2>/dev/null || iptables -t "$t" -A "$c" "$@"; }
+ipt6() { local t=$1 c=$2; shift 2; ip6tables -t "$t" -C "$c" "$@" 2>/dev/null || ip6tables -t "$t" -A "$c" "$@"; }
+cgdir() { local b; for b in /sys/fs/cgroup /sys/fs/cgroup/unified; do [ -d "$b/$1" ] && return 0; done; return 1; }
+
+base() {
+  ip route replace unreachable default table $TBL metric 9999
+  ip rule show | grep -q "fwmark $MARK lookup $TBL" || ip rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
+  ip rule show | grep -q "from $TUN_LOCAL lookup $TBL" || ip rule add from $TUN_LOCAL lookup $TBL priority $PRIO_SRC
+  iptables -t mangle -N SSHPLUS_TUN 2>/dev/null
+  ipt mangle OUTPUT -j SSHPLUS_TUN
+  iptables -t nat -N SSHPLUS_UDPGW_U 2>/dev/null; iptables -t nat -N SSHPLUS_UDPGW_C 2>/dev/null
+  ipt nat OUTPUT -j SSHPLUS_UDPGW_U
+  ipt nat OUTPUT -j SSHPLUS_UDPGW_C
+  ipt nat POSTROUTING -o "$TUN_DEV" -j MASQUERADE
+  if [ "$V6" = 1 ]; then
+    ip -6 route replace unreachable default table $TBL metric 9999
+    ip -6 rule show | grep -q "fwmark $MARK lookup $TBL" || ip -6 rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
+    ip6tables -t mangle -N SSHPLUS_TUN 2>/dev/null
+    ipt6 mangle OUTPUT -j SSHPLUS_TUN
+  fi
+}
+mark() {
+  # a cgroup match is bound to the cgroup that exists NOW: re-apply it whenever a tunnel service (re)starts
+  iptables -t mangle -N SSHPLUS_TUN 2>/dev/null; iptables -t mangle -F SSHPLUS_TUN
+  iptables -t nat -N SSHPLUS_UDPGW_C 2>/dev/null; iptables -t nat -F SSHPLUS_UDPGW_C
+  if [ "$V6" = 1 ]; then ip6tables -t mangle -N SSHPLUS_TUN 2>/dev/null; ip6tables -t mangle -F SSHPLUS_TUN; fi
+  local cg
+  for cg in $CGS; do
+    cgdir "$cg" || continue
+    iptables -t mangle -A SSHPLUS_TUN -m cgroup --path "$cg" -j MARK --set-xmark $MARK/0xffffffff || return 1
+    if [ "$V6" = 1 ]; then ip6tables -t mangle -A SSHPLUS_TUN -m cgroup --path "$cg" -j MARK --set-xmark $MARK/0xffffffff || return 1; fi
+  done
+  if cgdir "$CG_DB"; then
+    iptables -t nat -A SSHPLUS_UDPGW_C -p tcp -d 127.0.0.1 --dport "$UDP_PORT" -m cgroup --path "$CG_DB" \
+      -j DNAT --to-destination "127.0.0.1:$TUDP" || return 1
+  fi
+}
+up() {
+  ip addr replace "$TUN_LOCAL/30" dev "$TUN_DEV"
+  ip link set "$TUN_DEV" mtu 1400 up
+  sysctl -qw "net.ipv4.conf.$TUN_DEV.rp_filter=0" 2>/dev/null
+  ip route replace default dev "$TUN_DEV" table $TBL metric 1
+}
+down() { ip route del default dev "$TUN_DEV" table $TBL metric 1 2>/dev/null; return 0; }
+sync() {
+local out uids u
+out=$(python3 - "$TBL" "$PRIO_UID" <<'PY'
+import subprocess,sys
+tbl,prio=sys.argv[1],sys.argv[2]; SH="/usr/local/bin/sshplus-shell-t"
+want=set()
+for l in open("/etc/passwd"):
+    p=l.rstrip("\n").split(":")
+    if len(p)>=7 and p[6]==SH and p[2].isdigit(): want.add(int(p[2]))
+for fam in ("-4","-6"):
+    r=subprocess.run(["ip",fam,"-o","rule","show"],capture_output=True,text=True)
+    if r.returncode!=0: continue                      # IPv6 not available
+    have={}
+    for l in r.stdout.splitlines():
+        t=l.replace("\t"," ").split()
+        if t and t[0]==prio+":" and "uidrange" in t and "lookup" in t and t[t.index("lookup")+1]==tbl:
+            x=t[t.index("uidrange")+1]; a,_,b=x.partition("-")
+            if a==b and a.isdigit(): have[int(a)]=x
+    for u in sorted(want-set(have)): subprocess.run(["ip",fam,"rule","add","uidrange","%d-%d"%(u,u),"lookup",tbl,"priority",prio],stdout=2)
+    for u in sorted(set(have)-want): subprocess.run(["ip",fam,"rule","del","uidrange",have[u],"lookup",tbl,"priority",prio],stdout=2)
+print("UIDS:"+" ".join(str(u) for u in sorted(want)))
+PY
+)
+  uids=$(printf '%s\n' "$out" | sed -n 's/^UIDS://p')
+  # UDPGW for OpenSSH tunnel accounts (forwarding runs as the user)
+  iptables -t nat -N SSHPLUS_UDPGW_U 2>/dev/null; iptables -t nat -F SSHPLUS_UDPGW_U
+  for u in $uids; do
+    iptables -t nat -A SSHPLUS_UDPGW_U -p tcp -d 127.0.0.1 --dport "$UDP_PORT" -m owner --uid-owner "$u" \
+      -j DNAT --to-destination "127.0.0.1:$TUDP"
+  done
+}
+clean() {
+  for F in -4 -6; do
+    while ip $F rule del priority $PRIO_UID 2>/dev/null; do :; done
+    ip $F rule del priority $PRIO_MARK 2>/dev/null; ip $F rule del priority $PRIO_SRC 2>/dev/null
+    ip $F route flush table $TBL 2>/dev/null
+  done
+  for T in iptables ip6tables; do
+    command -v $T >/dev/null 2>&1 || continue
+    $T -t mangle -D OUTPUT -j SSHPLUS_TUN 2>/dev/null; $T -t mangle -F SSHPLUS_TUN 2>/dev/null; $T -t mangle -X SSHPLUS_TUN 2>/dev/null
+  done
+  local c
+  for c in SSHPLUS_UDPGW_U SSHPLUS_UDPGW_C; do
+    iptables -t nat -D OUTPUT -j $c 2>/dev/null; iptables -t nat -F $c 2>/dev/null; iptables -t nat -X $c 2>/dev/null
+  done
+  iptables -t nat -D POSTROUTING -o "$TUN_DEV" -j MASQUERADE 2>/dev/null
+  return 0
+}
+case "$1" in
+  boot) base; sync ;;
+  base) base ;;
+  mark) mark ;;
+  up) up ;;
+  down) down ;;
+  sync) base; sync ;;
+  clean) clean ;;
+  *) echo "usage: $0 boot|base|mark|up|down|sync|clean"; exit 1 ;;
+esac

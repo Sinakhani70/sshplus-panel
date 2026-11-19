@@ -1,0 +1,16 @@
+[Unit]
+Description=BadVPN UDPGW (tunnel accounts, routed through the tunnel)
+After=network.target sshplus-tunnel-net.service
+Wants=sshplus-tunnel-net.service
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/sshplus-tunnel-net base
+ExecStart=/usr/local/bin/start-badvpn.sh tunnel
+ExecStartPost=/usr/local/bin/sshplus-tunnel-net mark
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+Nice=-5
+[Install]
+WantedBy=multi-user.target

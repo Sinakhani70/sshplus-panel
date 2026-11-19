@@ -1,0 +1,13 @@
+[Unit]
+Description=BadVPN UDPGW
+After=network.target
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-badvpn.sh
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+Nice=-5
+[Install]
+WantedBy=multi-user.target

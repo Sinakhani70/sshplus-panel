@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# ==============================================================================
+#  SSH Plus Panel v1.6.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#                            + Tunnel (SSH tun to an exit server, one-click)
+#  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
+#
+#  Usage:
+#     bash install.sh
+#  or:
+#     bash <(curl -Ls https://raw.githubusercontent.com/<USER>/<REPO>/main/install.sh)
+#
+#  Re-running is safe: existing users, ports and settings are kept.
+#  Log: /var/log/sshplus/install.log
+# ==============================================================================
+
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+VERSION="1.6.0"
+LOG=/var/log/sshplus/install.log
+
+[ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
+
+# ------------------------------------------------------------------------------
+step1() {
+echo ">>> SSH Plus Panel v$VERSION"
+echo ">>> [1/4] Base system, BBR, BadVPN"
+mkdir -p /opt/sshplus-panel /etc/SSHPlus /etc/dropbear /var/log/sshplus
+echo "== install $(date)" >> $LOG
+
+# 1) package index update (prerequisite)  2) curl  3) everything else
+apt-get update -y >>$LOG 2>&1 || echo "WARN: apt-get update ناموفق بود (لاگ: $LOG)"
+apt-get install -y curl >>$LOG 2>&1
+apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server openssh-client sshpass openssl python3-cryptography python3-qrcode iptables iproute2 psmisc procps kmod >>$LOG 2>&1
+for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables openssl; do
+  command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
+done
+
+# cleanup of old TLS / WebSocket stack
+for s in sshplus-tls sshplus-ws haproxy; do
+  systemctl disable --now $s >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/$s.service
+done
+rm -f /usr/local/bin/start-sshplus-tls.sh /usr/local/bin/sshplus-ws.py /usr/local/bin/sshplus-cert.sh
+pkill -f /usr/local/bin/sshplus-ws.py 2>/dev/null || true
+systemctl disable --now dropbear >/dev/null 2>&1 || true
+for s in sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel; do systemctl stop $s >/dev/null 2>&1 || true; done
+
+# kernel tuning
+cat > /etc/sysctl.d/98-sshplus.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_mtu_probing=1
+EOF
+
+# BBR (not re-enabled if it was turned off from the panel)
+if [ ! -f /etc/sysctl.d/99-sshplus-bbr.conf ]; then
+  modprobe tcp_bbr 2>>$LOG || true
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+    echo tcp_bbr > /etc/modules-load.d/sshplus-bbr.conf
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > /etc/sysctl.d/99-sshplus-bbr.conf
+  else
+    echo "WARN: این کرنل BBR ندارد"
+  fi
+fi
+sysctl --system >>$LOG 2>&1
+
+# tunnel shell
+cat > /usr/local/bin/sshplus-shell <<'EOF'
+@@INCLUDE scripts/sshplus-shell@@
+EOF
+chmod 755 /usr/local/bin/sshplus-shell
+# tunnel accounts use their own shell (same behaviour); the shell tells which Dropbear instance accepts the account
+install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t
+for sh in /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t; do
+  grep -qxF "$sh" /etc/shells || echo "$sh" >> /etc/shells
+done
+# per-instance /etc/shells (bind-mounted into each Dropbear service): direct instance rejects tunnel accounts and vice versa
+grep -vxF /usr/local/bin/sshplus-shell-t /etc/shells > /etc/SSHPlus/shells.direct
+grep -vxF /usr/local/bin/sshplus-shell   /etc/shells > /etc/SSHPlus/shells.tunnel
+
+# quick admin password change from terminal
+cat > /usr/local/bin/sshplus-pass <<'EOF'
+@@INCLUDE scripts/sshplus-pass@@
+EOF
+chmod 755 /usr/local/bin/sshplus-pass
+
+# build BadVPN (UDPGW)
+if [ ! -x /usr/local/bin/badvpn-udpgw ]; then
+  rm -rf /usr/local/src/badvpn
+  git clone --depth 1 https://github.com/ambrop72/badvpn.git /usr/local/src/badvpn >>$LOG 2>&1
+  mkdir -p /usr/local/src/badvpn/build && cd /usr/local/src/badvpn/build
+  cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS="-O2 -fcommon -Wno-error" >>$LOG 2>&1
+  make -j"$(nproc)" >>$LOG 2>&1
+  install -m 755 udpgw/badvpn-udpgw /usr/local/bin/badvpn-udpgw 2>>$LOG
+  cd /root
+fi
+[ -x /usr/local/bin/badvpn-udpgw ] || { echo "FAILED: کامپایل BadVPN. لاگ: $LOG"; exit 1; }
+
+# config files (existing ones are kept)
+[ -f /etc/SSHPlus/panel.json ] || echo '{"port":2053,"username":"admin","password":"admin","bind":"0.0.0.0"}' > /etc/SSHPlus/panel.json
+[ -f /etc/SSHPlus/badvpn.conf ] || printf "UDP_PORT=7300\nBIND_ADDR=127.0.0.1\nUDP_MTU=1200\nMAX_CLIENTS=1000\nMAX_CONN=64\nSEND_BUFFER=65536\nMSS_CLAMP=1\n" > /etc/SSHPlus/badvpn.conf
+[ -f /etc/SSHPlus/meta.json ] || echo '{}' > /etc/SSHPlus/meta.json
+touch /root/users.db
+
+# ports.json: create or top-up to 6 Dropbear ports (SSH ports such as 9011 stay reserved)
+# + "tdb": Dropbear ports reserved for tunnel accounts
+python3 - <<'PY'
+import json,os,re,subprocess
+p="/etc/SSHPlus/ports.json"
+d=json.load(open(p)) if os.path.exists(p) else {}
+s1=int(d.get("ssh",22) or 22); s2=int(d.get("ssh2",2222) or 0)
+res={22,s1,s2,2053,7300}
+try:
+    o=subprocess.run(["sshd","-T"],capture_output=True,text=True,timeout=10).stdout
+    for l in o.splitlines():
+        if l.startswith("port "): res.add(int(l.split()[1]))
+except Exception: pass
+try:                                   # ports taken by OTHER programs (nginx, x-ui, ...) are not usable for Dropbear
+    o=subprocess.run(["ss","-ltnpH"],capture_output=True,text=True,timeout=10).stdout
+    for l in o.splitlines():
+        f=l.split(); m=re.search(r":(\d+)$",f[3]) if len(f)>=4 else None
+        if m and not set(re.findall(r'\("([^"]+)"',l))<={"dropbear","sshd"}: res.add(int(m.group(1)))
+except Exception: pass
+old_t=[]
+for x in d.get("tdb",[]):
+    try: v=int(x)
+    except Exception: continue
+    if 0<v<65536 and v not in res and v not in old_t: old_t.append(v)
+db=[]
+for x in list(d.get("db",[]))+[442,444,8085,8443,10443,9443,8880,2083]:
+    try: v=int(x)
+    except Exception: continue
+    if 0<v<65536 and v not in res and v not in old_t and v not in db: db.append(v)
+db=db[:6]
+tdb=old_t[:4]
+for v in (2087,2096,4443,8444,2095):
+    if len(tdb)>=2: break
+    if v not in res and v not in db and v not in tdb: tdb.append(v)
+json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb},open(p,"w"))
+print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb)
+PY
+chmod 600 /etc/SSHPlus/panel.json /etc/SSHPlus/meta.json /root/users.db
+echo "=== STEP 1 OK ==="
+}
+
+# ------------------------------------------------------------------------------
+step2() {
+echo ">>> [2/4] OpenSSH, Dropbear, BadVPN services"
+mkdir -p /etc/ssh/sshd_config.d
+F=/etc/ssh/sshd_config.d/00-sshplus.conf
+PORTS=$(grep -hE '^Port ' $F 2>/dev/null | sort -u)
+[ -n "$PORTS" ] || PORTS=$'Port 22\nPort 2222'
+cp -a $F /root/00-sshplus.conf.bak 2>/dev/null || true
+{
+echo "$PORTS"
+cat <<'EOF'
+PasswordAuthentication yes
+PermitRootLogin yes
+UsePAM yes
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+AllowAgentForwarding yes
+GatewayPorts yes
+PermitTunnel yes
+TCPKeepAlive yes
+ClientAliveInterval 30
+ClientAliveCountMax 10
+MaxSessions 100
+MaxStartups 100:30:200
+EOF
+} > $F
+if ! sshd -t 2>>$LOG; then
+  echo "کانفیگ sshd خطا دارد؛ برگشت به بکاپ"
+  [ -f /root/00-sshplus.conf.bak ] && cp /root/00-sshplus.conf.bak $F || rm -f $F
+  exit 1
+fi
+systemctl stop ssh.socket 2>/dev/null || true
+systemctl disable ssh.socket 2>/dev/null || true
+systemctl enable ssh.service >/dev/null 2>&1 || true
+systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+if ! systemctl is-active --quiet ssh; then
+  echo "WARN: ssh بالا نیامد؛ فعال‌سازی socket"
+  systemctl enable --now ssh.socket 2>/dev/null || true
+fi
+
+# Dropbear: "direct" instance (ports.json "db", up to 6) and "tunnel" instance (ports.json "tdb")
+cat > /usr/local/bin/start-dropbear.sh <<'EOF'
+@@INCLUDE scripts/start-dropbear.sh@@
+EOF
+chmod 755 /usr/local/bin/start-dropbear.sh
+
+# ---- Tunnel: network helper (policy routing, fail-closed) ----
+# Tunnel accounts are routed into routing table 100:
+#   * OpenSSH accounts  -> "ip rule uidrange" (forwarding runs as the user)
+#   * Tunnel Dropbear   -> cgroup mark (Dropbear forwards as root, so uid cannot be used)
+# Table 100 always holds an "unreachable" default: if the tunnel is down, tunnel
+# accounts get NO connectivity instead of silently leaking out of this server.
+cat > /usr/local/bin/sshplus-tunnel-net <<'EOF'
+@@INCLUDE scripts/sshplus-tunnel-net@@
+EOF
+chmod 755 /usr/local/bin/sshplus-tunnel-net
+
+# ---- Tunnel: SSH tun link to the exit server (L3 tunnel over ssh -w) ----
+cat > /usr/local/bin/start-tunnel.sh <<'EOF'
+@@INCLUDE scripts/start-tunnel.sh@@
+EOF
+chmod 755 /usr/local/bin/start-tunnel.sh
+
+cat > /usr/local/bin/sshplus-tunnel-setup <<'EOF'
+@@INCLUDE scripts/sshplus-tunnel-setup@@
+EOF
+chmod 755 /usr/local/bin/sshplus-tunnel-setup
+
+# BadVPN
+cat > /usr/local/bin/start-badvpn.sh <<'EOF'
+@@INCLUDE scripts/start-badvpn.sh@@
+EOF
+chmod 755 /usr/local/bin/start-badvpn.sh
+
+# systemd units
+cat > /etc/systemd/system/sshplus-dropbear.service <<'EOF'
+@@INCLUDE systemd/sshplus-dropbear.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-dropbear-t.service <<'EOF'
+@@INCLUDE systemd/sshplus-dropbear-t.service@@
+EOF
+
+cat > /etc/systemd/system/badvpn-t.service <<'EOF'
+@@INCLUDE systemd/badvpn-t.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-tunnel-net.service <<'EOF'
+@@INCLUDE systemd/sshplus-tunnel-net.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-tunnel.service <<'EOF'
+@@INCLUDE systemd/sshplus-tunnel.service@@
+EOF
+
+cat > /etc/systemd/system/badvpn.service <<'EOF'
+@@INCLUDE systemd/badvpn.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-panel.service <<'EOF'
+@@INCLUDE systemd/sshplus-panel.service@@
+EOF
+systemctl daemon-reload
+echo "=== STEP 2 OK ==="
+}
+
+# ------------------------------------------------------------------------------
+step3() {
+echo ">>> [3/4] Panel backend (app.py)"
+cat > /opt/sshplus-panel/app.py <<'PYEOF'
+@@INCLUDE panel/app.py@@
+PYEOF
+sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/app.py
+chmod 755 /opt/sshplus-panel/app.py
+python3 -m py_compile /opt/sshplus-panel/app.py || { echo "FAILED: app.py syntax error"; exit 1; }
+echo "=== STEP 3 OK ==="
+}
+
+# ------------------------------------------------------------------------------
+step4() {
+echo ">>> [4/4] Panel UI + start services"
+cat > /opt/sshplus-panel/index.html <<'HTMLEOF'
+@@INCLUDE panel/index.html@@
+HTMLEOF
+sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
+
+# firewall: only if ufw is active
+FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))')"
+if ufw status 2>/dev/null | grep -q '^Status: active'; then
+  for p in $FWP; do ufw allow "${p}/tcp" >/dev/null 2>&1; done
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+  for p in $FWP; do firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1; done
+  firewall-cmd --reload >/dev/null 2>&1
+fi
+
+systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net sshplus-tunnel badvpn badvpn-t 2>/dev/null || true
+systemctl enable sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net badvpn badvpn-t >/dev/null 2>&1
+systemctl restart sshplus-tunnel-net
+systemctl restart sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel
+# a tunnel configured by a previous run keeps working after an update
+if [ -f /etc/SSHPlus/tunnel.conf ]; then
+  systemctl enable sshplus-tunnel >/dev/null 2>&1
+  systemctl restart sshplus-tunnel
+fi
+sleep 2
+
+IP=$(curl -sfL --max-time 4 https://api.ipify.org || hostname -I | awk '{print $1}')
+echo "=========================================="
+echo "Panel:     $(systemctl is-active sshplus-panel)"
+echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t))"
+if [ -f /etc/SSHPlus/tunnel.conf ]; then echo "Tunnel:    $(systemctl is-active sshplus-tunnel)"; else echo "Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)"; fi
+echo "BadVPN:    $(systemctl is-active badvpn)   (tunnel instance: $(systemctl is-active badvpn-t))"
+echo "SSH:       $(systemctl is-active ssh)"
+echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
+echo "--- listening:"
+ss -tlnp | grep -E 'dropbear|badvpn|python3|sshd' | awk '{print $4, $6}'
+echo "Version:   $VERSION"
+echo "Panel URL: https://${IP}:2053  (first login: admin / admin, you must change it)"
+echo "=========================================="
+}
+
+# ------------------------------------------------------------------------------
+mkdir -p /var/log/sshplus
+# SSHPLUS_LIB=1 only loads the functions (used for testing)
+if [ -z "$SSHPLUS_LIB" ]; then
+  step1
+  step2
+  step3
+  step4
+fi
