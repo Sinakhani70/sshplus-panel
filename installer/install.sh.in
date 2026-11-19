@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.6.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.7.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
+#                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
 #
 #  Usage:
@@ -14,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.6.0"
+VERSION="1.7.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -30,6 +31,9 @@ echo "== install $(date)" >> $LOG
 apt-get update -y >>$LOG 2>&1 || echo "WARN: apt-get update ناموفق بود (لاگ: $LOG)"
 apt-get install -y curl >>$LOG 2>&1
 apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server openssh-client sshpass openssl python3-cryptography python3-qrcode iptables iproute2 psmisc procps kmod >>$LOG 2>&1
+# SSH over TLS front. Optional here: the panel installs it on demand when TLS is switched on. Its own generic service is not used.
+apt-get install -y stunnel4 >>$LOG 2>&1 || echo "WARN: stunnel4 نصب نشد؛ هنگام روشن‌کردن TLS از پنل نصب می‌شود"
+systemctl disable --now stunnel4 >/dev/null 2>&1 || true
 for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables openssl; do
   command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
 done
@@ -42,7 +46,7 @@ done
 rm -f /usr/local/bin/start-sshplus-tls.sh /usr/local/bin/sshplus-ws.py /usr/local/bin/sshplus-cert.sh
 pkill -f /usr/local/bin/sshplus-ws.py 2>/dev/null || true
 systemctl disable --now dropbear >/dev/null 2>&1 || true
-for s in sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel; do systemctl stop $s >/dev/null 2>&1 || true; done
+for s in sshplus-stunnel sshplus-dropbear-s sshplus-dropbear-ts sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel; do systemctl stop $s >/dev/null 2>&1 || true; done
 
 # kernel tuning
 cat > /etc/sysctl.d/98-sshplus.conf <<'EOF'
@@ -69,13 +73,18 @@ cat > /usr/local/bin/sshplus-shell <<'EOF'
 EOF
 chmod 755 /usr/local/bin/sshplus-shell
 # tunnel accounts use their own shell (same behaviour); the shell tells which Dropbear instance accepts the account
-install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t
-for sh in /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-t; do
-  grep -qxF "$sh" /etc/shells || echo "$sh" >> /etc/shells
+# account = type (direct/tunnel) x connection (both/normal/tls): -t tunnel, -n normal only, -s TLS only, -tn / -ts the tunnel variants
+ALLSH="sshplus-shell sshplus-shell-t sshplus-shell-n sshplus-shell-tn sshplus-shell-s sshplus-shell-ts"
+for s in $ALLSH; do
+  [ "$s" = sshplus-shell ] || install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/$s
+  grep -qxF "/usr/local/bin/$s" /etc/shells || echo "/usr/local/bin/$s" >> /etc/shells
 done
-# per-instance /etc/shells (bind-mounted into each Dropbear service): direct instance rejects tunnel accounts and vice versa
-grep -vxF /usr/local/bin/sshplus-shell-t /etc/shells > /etc/SSHPlus/shells.direct
-grep -vxF /usr/local/bin/sshplus-shell   /etc/shells > /etc/SSHPlus/shells.tunnel
+# per-instance /etc/shells (bind-mounted into each Dropbear service): an instance only accepts the account shells it serves
+shells_file() { local kind=$1; shift; { grep -vxF -f <(printf '/usr/local/bin/%s\n' $ALLSH) /etc/shells; printf '/usr/local/bin/%s\n' "$@"; } > /etc/SSHPlus/shells.$kind; }
+shells_file direct sshplus-shell   sshplus-shell-n      # plain ports, direct accounts
+shells_file tunnel sshplus-shell-t sshplus-shell-tn     # plain ports, tunnel accounts
+shells_file tlsd   sshplus-shell   sshplus-shell-s      # TLS back end, direct accounts
+shells_file tlst   sshplus-shell-t sshplus-shell-ts     # TLS back end, tunnel accounts
 
 # quick admin password change from terminal
 cat > /usr/local/bin/sshplus-pass <<'EOF'
@@ -225,6 +234,18 @@ cat > /etc/systemd/system/sshplus-dropbear-t.service <<'EOF'
 @@INCLUDE systemd/sshplus-dropbear-t.service@@
 EOF
 
+cat > /etc/systemd/system/sshplus-dropbear-s.service <<'EOF'
+@@INCLUDE systemd/sshplus-dropbear-s.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-dropbear-ts.service <<'EOF'
+@@INCLUDE systemd/sshplus-dropbear-ts.service@@
+EOF
+
+cat > /etc/systemd/system/sshplus-stunnel.service <<'EOF'
+@@INCLUDE systemd/sshplus-stunnel.service@@
+EOF
+
 cat > /etc/systemd/system/badvpn-t.service <<'EOF'
 @@INCLUDE systemd/badvpn-t.service@@
 EOF
@@ -269,7 +290,7 @@ HTMLEOF
 sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
 
 # firewall: only if ufw is active
-FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))')"
+FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))') $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/tls.json"));print(" ".join(map(str,d.get("ports",[])+d.get("tports",[]))) if d.get("on") else "")' 2>/dev/null)"
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
   for p in $FWP; do ufw allow "${p}/tcp" >/dev/null 2>&1; done
 fi
@@ -282,6 +303,11 @@ systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus
 systemctl enable sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net badvpn badvpn-t >/dev/null 2>&1
 systemctl restart sshplus-tunnel-net
 systemctl restart sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel
+# SSH over TLS stays on after an update if it was switched on from the panel
+if python3 -c 'import json,sys;sys.exit(0 if json.load(open("/etc/SSHPlus/tls.json")).get("on") else 1)' 2>/dev/null; then
+  systemctl enable sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel >/dev/null 2>&1
+  systemctl restart sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel
+fi
 # a tunnel configured by a previous run keeps working after an update
 if [ -f /etc/SSHPlus/tunnel.conf ]; then
   systemctl enable sshplus-tunnel >/dev/null 2>&1
@@ -293,12 +319,13 @@ IP=$(curl -sfL --max-time 4 https://api.ipify.org || hostname -I | awk '{print $
 echo "=========================================="
 echo "Panel:     $(systemctl is-active sshplus-panel)"
 echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t))"
+if systemctl is-active --quiet sshplus-stunnel; then echo "SSH-TLS:   active (Panel -> TLS tab)"; else echo "SSH-TLS:   off (Panel -> TLS tab to switch on)"; fi
 if [ -f /etc/SSHPlus/tunnel.conf ]; then echo "Tunnel:    $(systemctl is-active sshplus-tunnel)"; else echo "Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)"; fi
 echo "BadVPN:    $(systemctl is-active badvpn)   (tunnel instance: $(systemctl is-active badvpn-t))"
 echo "SSH:       $(systemctl is-active ssh)"
 echo "BBR:       $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
 echo "--- listening:"
-ss -tlnp | grep -E 'dropbear|badvpn|python3|sshd' | awk '{print $4, $6}'
+ss -tlnp | grep -E 'dropbear|badvpn|python3|sshd|stunnel' | awk '{print $4, $6}'
 echo "Version:   $VERSION"
 echo "Panel URL: https://${IP}:2053  (first login: admin / admin, you must change it)"
 echo "=========================================="

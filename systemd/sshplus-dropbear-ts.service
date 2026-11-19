@@ -1,0 +1,17 @@
+[Unit]
+Description=SSH Plus Dropbear (TLS back end, tunnel accounts, 127.0.0.1 only)
+After=network.target sshplus-tunnel-net.service
+Wants=sshplus-tunnel-net.service
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+BindReadOnlyPaths=/etc/SSHPlus/shells.tlst:/etc/shells
+ExecStartPre=/usr/local/bin/sshplus-tunnel-net base
+ExecStart=/usr/local/bin/start-dropbear.sh tlst
+ExecStartPost=/usr/local/bin/sshplus-tunnel-net mark
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+Nice=-5
+[Install]
+WantedBy=multi-user.target

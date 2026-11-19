@@ -10,14 +10,15 @@
 body{background:var(--bg);color:var(--tx);padding:1rem;max-width:1280px;margin:auto}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1.1rem;margin-bottom:1rem}
 .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:.75rem;margin-bottom:1rem}
-.g2{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:1rem;margin-bottom:1rem}
+.g2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(310px,100%),1fr));gap:1rem;margin-bottom:1rem}
 textarea{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem;font-family:monospace;font-size:.75rem}
 input,select{width:100%;background:#080c17;border:1px solid var(--bd);color:var(--tx);padding:.55rem;border-radius:8px;margin:.25rem 0 .7rem}
 label{font-size:.8rem;color:var(--mu)}
 .btn{background:var(--pr);color:#031116;border:none;padding:.55rem 1rem;border-radius:8px;font-weight:700;cursor:pointer}
 .btn-s{padding:.35rem .65rem;font-size:.8rem}.btn-e{background:var(--er);color:#fff}.btn-w{background:var(--wn);color:#000}.btn-o{background:var(--ok);color:#03130c}
-.tab-bar{display:flex;gap:.6rem;margin-bottom:1rem;border-bottom:1px solid var(--bd);padding-bottom:.75rem}
-.tab-btn{background:var(--card);color:var(--mu);border:1px solid var(--bd);padding:.6rem 1.2rem;border-radius:10px;font-weight:700;cursor:pointer;flex:1;text-align:center}
+.tab-bar{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;border-bottom:1px solid var(--bd);padding-bottom:.75rem}
+.tab-btn{background:var(--card);color:var(--mu);border:1px solid var(--bd);padding:.6rem 1rem;border-radius:10px;font-weight:700;cursor:pointer;flex:1 1 auto;text-align:center}
+@media(max-width:640px){.tab-btn{padding:.5rem .6rem;font-size:.85rem}}
 .tab-btn.act{background:rgba(6,182,212,.15);color:var(--pr);border-color:var(--pr)}
 .bdg{padding:.2rem .6rem;border-radius:99px;font-size:.75rem;font-weight:700;display:inline-block;max-width:100%;overflow-wrap:anywhere}
 .ok{background:rgba(16,185,129,.15);color:var(--ok)}.er{background:rgba(239,68,68,.15);color:var(--er)}.wn{background:rgba(245,158,11,.15);color:var(--wn)}
@@ -67,6 +68,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
+  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select>
+  <div id="eCx" style="font-size:.76rem;color:var(--wn);margin:-.4rem 0 .5rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
   <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
   <div style="display:flex;gap:.5rem">
@@ -90,6 +93,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 <div class="tab-bar">
   <button id="bTabU" class="tab-btn act" onclick="swTab('u')">👥 کاربران</button>
   <button id="bTabT" class="tab-btn" onclick="swTab('t')">🌐 تانل</button>
+  <button id="bTabL" class="tab-btn" onclick="swTab('l')">🔒 TLS و دامنه</button>
   <button id="bTabH" class="tab-btn" onclick="swTab('h')">📈 آمار</button>
   <button id="bTabS" class="tab-btn" onclick="swTab('s')">⚙️ تنظیمات سرور</button>
 </div>
@@ -117,12 +121,14 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
+      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
       <div><label>کاربر همزمان</label><input id="nl" type="number" value="1" min="1"></div>
     </div>
-    <div id="nHint" style="font-size:.8rem;color:var(--mu);margin:.2rem 0 .7rem;line-height:1.8"></div>
+    <div id="nHint" style="font-size:.8rem;color:var(--mu);margin:.2rem 0 .3rem;line-height:1.8"></div>
+    <div id="nCx" style="font-size:.78rem;color:var(--wn);margin:0 0 .7rem;line-height:1.8"></div>
     <button class="btn" onclick="saveUser(0)">ایجاد اکانت</button>
   </div>
 
@@ -137,6 +143,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
+      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
       <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
     </div>
     <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
@@ -201,6 +208,56 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     ۴) UDPGW (بازی/تماس) روی هر چهار ترکیب کار می‌کند. وقتی <bdi dir="ltr"><b>Out</b></bdi> روی «سرور ۲» باشد از تانل می‌گذرد. کلاینت همان <span dir="ltr">127.0.0.1:7300</span> را استفاده می‌کند.<br>
     ۵) تانل روی SSH (TCP) است؛ برای سرعت بهتر BBR را روی هر دو سرور روشن نگه دار.</div>
   </div>
+</div>
+
+<div id="secL" class="hid">
+  <div class="g2">
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">🔒 SSH روی TLS</h3>
+      <div id="tlsStat" style="margin-bottom:.6rem">--</div>
+      <label style="display:flex;gap:.5rem;align-items:center;color:var(--tx);margin-bottom:.7rem"><input type="checkbox" id="tlsOn" style="width:auto;margin:0" onchange="tlsToggle()"><b>فعال‌سازی SSH روی TLS</b></label>
+      <div class="row">
+        <div><label>پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)</label><input id="tlsP1" dir="ltr" placeholder="443"></div>
+        <div><label>پورت(های) TLS اکانت‌های تانل</label><input id="tlsP2" dir="ltr" placeholder="8843"></div>
+      </div>
+      <button class="btn btn-s" onclick="tlsPorts()">💾 ذخیره‌ی پورت‌ها</button>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• پورت‌های OpenSSH (مثل 22) به نوع اتصال وابسته نیستند و همه‌ی اکانت‌های پنل روی آن‌ها کار می‌کنند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:.7rem;color:var(--pr)">📜 گواهی فعلی</h3>
+      <div id="tlsCert" style="font-size:.85rem;line-height:1.9;margin-bottom:.6rem"></div>
+      <button class="btn btn-s btn-w" onclick="tlsSelf()">↩️ بازگشت به گواهی self-signed</button>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsShared">همین گواهی و دامنه برای HTTPS خودِ پنل هم استفاده می‌شود؛ جای دیگری چیزی لازم نیست تنظیم شود.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.7rem;color:var(--pr)">🌍 دامنه و گواهی (یک‌کلیک)</h3>
+    <div class="row">
+      <div><label>منبع دامنه</label><select id="tlsSrc" onchange="tlsSrcUi()"><option value="free">دامنه‌ی رایگان (خودکار)</option><option value="own">دامنه‌ی خودم را دارم</option></select></div>
+      <div><label>ایمیل (اختیاری؛ برای هشدار انقضا از Let's Encrypt)</label><input id="tlsMail" dir="ltr" autocapitalize="none" placeholder="you@example.com"></div>
+    </div>
+    <div id="tlsFree">
+      <div class="row">
+        <div><label>سرویس دامنه‌ی رایگان</label><select id="tlsProv" onchange="tlsSrcUi()"><option value="sslip">sslip.io — بدون ثبت‌نام</option><option value="nip">nip.io — بدون ثبت‌نام</option><option value="duckdns">DuckDNS — زیردامنه‌ی ثابت (حساب رایگان لازم است)</option><option value="custom">سرویس wildcard-DNS دیگر (خودت وارد کن)</option></select></div>
+        <div id="tlsDuckN"><label>نام زیردامنه در DuckDNS</label><input id="tlsDuckName" dir="ltr" autocapitalize="none" placeholder="myvpn"></div>
+        <div id="tlsDuckT"><label>توکن DuckDNS <span id="tlsDuckSet" style="color:var(--ok)"></span></label><input id="tlsDuckTok" type="password" dir="ltr" autocomplete="off" autocapitalize="none"></div>
+        <div id="tlsSufB"><label>پسوند سرویس (مثلاً sslip.io)</label><input id="tlsSuf" dir="ltr" autocapitalize="none" placeholder="sslip.io"></div>
+      </div>
+    </div>
+    <div id="tlsOwnB" class="hid"><label>دامنه‌ی شما</label><input id="tlsDom" dir="ltr" autocapitalize="none" placeholder="vpn.example.com"></div>
+    <div id="tlsProvNote" style="font-size:.78rem;color:var(--mu);line-height:1.9;margin:.1rem 0 .8rem"></div>
+    <button class="btn" id="tlsGo" onclick="tlsGo()">⚡ دریافت دامنه و گواهی</button>
+    <div id="tlsLog" style="margin-top:.8rem;font-size:.85rem;line-height:1.9"></div>
+  </div>
+
+  <details class="card">
+    <summary style="cursor:pointer;color:var(--pr);font-weight:700">⬆️ آپلود گواهی دلخواه (PEM)</summary>
+    <label style="display:block;margin-top:.7rem">دامنه‌ی این گواهی (برای لینک‌ها و SNI)</label><input id="tlsUpDom" dir="ltr" autocapitalize="none" placeholder="vpn.example.com">
+    <label>گواهی (fullchain، فرمت PEM)</label><textarea id="certPem" rows="3" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+    <label>کلید خصوصی (PEM)</label><textarea id="certKey" rows="3" dir="ltr" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+    <button class="btn btn-s" onclick="saveCert()">آپلود گواهی</button>
+  </details>
 </div>
 
 <div id="secH" class="hid">
@@ -271,12 +328,10 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div class="card">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">🔒 HTTPS و گواهی</h3>
     <div id="certInfo" style="font-size:.78rem;color:var(--mu);white-space:pre-wrap;direction:ltr;text-align:left;margin-bottom:.6rem"></div>
-    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.</div>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی و دامنه در تب «TLS و دامنه» مدیریت می‌شود (یک گواهی برای HTTPS پنل و SSH روی TLS)؛ گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد.</div>
     <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.2rem"><input type="checkbox" id="plainSub" style="width:auto;margin:.2rem 0 0" onchange="savePlainSub()"><span>اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)</span></label>
     <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin:0 0 .8rem">⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.</div>
-    <label>گواهی (fullchain، فرمت PEM)</label><textarea id="certPem" rows="3" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
-    <label>کلید خصوصی (PEM)</label><textarea id="certKey" rows="3" dir="ltr" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
-    <button class="btn btn-s" onclick="saveCert()">آپلود گواهی</button>
+    <button class="btn btn-s" onclick="swTab('l')">🔒 رفتن به تب TLS و دامنه</button>
   </div>
 
   <div class="card">
