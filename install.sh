@@ -1385,7 +1385,13 @@ def tunnel_setup_run(host,port,user,pw):
     return False,("تانل بالا نیامد: "+(h+"\n" if h else "")+(extra+"\n" if extra else "")+txt[-300:])
   def f_exit():
     ip=tun_exit_ip()
-    if not ip: return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)"
+    if not ip:
+      # the link works but nothing reaches the internet through it: say where it stops (DNS? routing here? forwarding / NAT on the exit server?)
+      cu=cmd(["curl","-sS","-m","8","--interface",TUN_LOCAL,"-o","/dev/null","-w","%{http_code}","http://1.1.1.1/"],12)
+      byip="HTTP "+cu[1] if cu[0]==0 else (cu[2] or "no answer")[-90:]
+      rg=cmd(["ip","-4","route","get","1.1.1.1","from",TUN_LOCAL])[1].replace("\n"," ")[:110]
+      rem=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ip_forward=$(sysctl -n net.ipv4.ip_forward); iptables -t nat -S POSTROUTING 2>&1 | head -3; iptables -S FORWARD 2>&1 | head -3; ip -4 route show default | head -1"],t=30)[1].replace("\n"," / ")[:330]
+      return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟) / the link is up but the internet is not reachable through it. direct-IP test: %s | route here: %s | exit server: %s"%(byip,rg,rem)
     c=tconf(); c["EXIT_IP"]=ip; tconf_write(c)
     return True,"IP خروجی تانل: "+ip
   try:
