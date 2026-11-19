@@ -1707,7 +1707,7 @@ def _tls_apply(d):
     tls_shell_files(); stunnel_write(c); ufw_open(set(c["ports"])|set(c["tports"]))
     for s in TLS_SVC[:2]: cmd(["systemctl","enable",s]); cmd(["systemctl","restart",s],20)
     cmd(["systemctl","enable",TLS_SVC[2]]); cmd(["systemctl","restart",TLS_SVC[2]],20)
-    end=time.time()+8; want=set(c["ports"])|set(c["tports"])
+    end=time.time()+12; want=set(c["ports"])|set(c["tports"])|tls_back_ports(c)         # the public ports AND every Dropbear back end
     while time.time()<end and not want<=set(listen_ports()): time.sleep(0.5)
     miss=sorted(want-set(listen_ports()))
     if miss:
