@@ -1771,7 +1771,7 @@ class H(BaseHTTPRequestHandler):
       p=urlparse(s.path).path
       if p in ("/","/index.html"):
         b=open(HTML,"rb").read()
-        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8")
+        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
