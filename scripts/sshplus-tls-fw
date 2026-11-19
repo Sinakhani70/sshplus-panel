@@ -1,0 +1,47 @@
+#!/bin/bash
+# usage: sshplus-tls-fw apply|clean
+# Per-client-IP limit on concurrent connections to the public TLS ports (own chain SSHPLUS_TLSLIM, nothing else is touched).
+# stunnel sees the real client address, so this stops one host from filling the TLS front with half-open connections.
+# Called by sshplus-stunnel.service (start / stop); the limit is tls.json "perip" (0 = no limit).
+CH=SSHPLUS_TLSLIM
+clean() {
+  local T
+  for T in iptables ip6tables; do
+    command -v $T >/dev/null 2>&1 || continue
+    while $T -D INPUT -j $CH 2>/dev/null; do :; done
+    $T -F $CH 2>/dev/null; $T -X $CH 2>/dev/null
+  done
+  return 0
+}
+apply() {
+  local out ports lim T M p
+  out=$(python3 - <<'PY'
+import json
+try:
+    d=json.load(open("/etc/SSHPlus/tls.json"))
+    ps=[int(x) for x in d.get("ports",[])+d.get("tports",[]) if 0<int(x)<65536] if d.get("on") else []
+    lim=int(d.get("perip",100))
+    print(" ".join(map(str,ps)),lim)
+except Exception:
+    print("","0")
+PY
+)
+  ports=${out% *}; lim=${out##* }
+  clean
+  [ -n "$ports" ] && [ "${lim:-0}" -gt 0 ] || return 0
+  for T in iptables ip6tables; do
+    command -v $T >/dev/null 2>&1 || continue
+    [ $T = ip6tables ] && { [ -s /proc/net/if_inet6 ] || continue; M=128; } || M=32
+    $T -N $CH 2>/dev/null || continue
+    for p in $ports; do
+      $T -A $CH -p tcp --dport "$p" -m connlimit --connlimit-above "$lim" --connlimit-mask $M -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    done
+    $T -I INPUT -j $CH 2>/dev/null || true
+  done
+  return 0
+}
+case "$1" in
+  apply) apply ;;
+  clean) clean ;;
+  *) echo "usage: $0 apply|clean"; exit 1 ;;
+esac

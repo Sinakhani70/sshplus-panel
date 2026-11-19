@@ -5,8 +5,8 @@
 # UDPGW: tunnel accounts that connect to 127.0.0.1:UDP_PORT are transparently redirected to a second
 # badvpn instance (UDP_PORT+1) that itself runs in the tunnel routing path.
 TBL=100; MARK=0x64; PRIO_MARK=90; PRIO_SRC=91; PRIO_UID=100
-CGS="system.slice/sshplus-dropbear-t.service system.slice/badvpn-t.service"
-CG_DB="system.slice/sshplus-dropbear-t.service"
+CG_DBS="system.slice/sshplus-dropbear-t.service system.slice/sshplus-dropbear-ts.service"      # tunnel Dropbear: normal + TLS back end
+CGS="$CG_DBS system.slice/badvpn-t.service"
 UDP_PORT=7300
 [ -f /etc/SSHPlus/badvpn.conf ] && . /etc/SSHPlus/badvpn.conf
 TUDP=$((UDP_PORT+1))
@@ -45,10 +45,11 @@ mark() {
     iptables -t mangle -A SSHPLUS_TUN -m cgroup --path "$cg" -j MARK --set-xmark $MARK/0xffffffff || return 1
     if [ "$V6" = 1 ]; then ip6tables -t mangle -A SSHPLUS_TUN -m cgroup --path "$cg" -j MARK --set-xmark $MARK/0xffffffff || return 1; fi
   done
-  if cgdir "$CG_DB"; then
-    iptables -t nat -A SSHPLUS_UDPGW_C -p tcp -d 127.0.0.1 --dport "$UDP_PORT" -m cgroup --path "$CG_DB" \
+  for cg in $CG_DBS; do
+    cgdir "$cg" || continue
+    iptables -t nat -A SSHPLUS_UDPGW_C -p tcp -d 127.0.0.1 --dport "$UDP_PORT" -m cgroup --path "$cg" \
       -j DNAT --to-destination "127.0.0.1:$TUDP" || return 1
-  fi
+  done
 }
 up() {
   ip addr replace "$TUN_LOCAL/30" dev "$TUN_DEV"
@@ -61,11 +62,12 @@ sync() {
 local out uids u
 out=$(python3 - "$TBL" "$PRIO_UID" <<'PY'
 import subprocess,sys
-tbl,prio=sys.argv[1],sys.argv[2]; SH="/usr/local/bin/sshplus-shell-t"
+tbl,prio=sys.argv[1],sys.argv[2]
+SH={"/usr/local/bin/sshplus-shell-"+x for x in ("t","tn","ts")}        # tunnel accounts: both / normal only / TLS only
 want=set()
 for l in open("/etc/passwd"):
     p=l.rstrip("\n").split(":")
-    if len(p)>=7 and p[6]==SH and p[2].isdigit(): want.add(int(p[2]))
+    if len(p)>=7 and p[6] in SH and p[2].isdigit(): want.add(int(p[2]))
 for fam in ("-4","-6"):
     r=subprocess.run(["ip",fam,"-o","rule","show"],capture_output=True,text=True)
     if r.returncode!=0: continue                      # IPv6 not available

@@ -6,13 +6,22 @@ from urllib.parse import urlparse, parse_qs, quote
 
 CFG="/etc/SSHPlus/panel.json"; DB="/root/users.db"; META="/etc/SSHPlus/meta.json"
 PORTS="/etc/SSHPlus/ports.json"; BV="/etc/SSHPlus/badvpn.conf"
-BBRF="/etc/sysctl.d/99-sshplus-bbr.conf"; SHELL="/usr/local/bin/sshplus-shell"; SHELL_T="/usr/local/bin/sshplus-shell-t"
+BBRF="/etc/sysctl.d/99-sshplus-bbr.conf"; SHELL="/usr/local/bin/sshplus-shell"; SHELL_T=SHELL+"-t"
 HTML="/opt/sshplus-panel/index.html"; SSHCONF="/etc/ssh/sshd_config.d/00-sshplus.conf"
-TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}
+TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}; DBA={}; IPS={}
 STATE={"first":True}; CACHE={"t":0.0,"v":None}; SSHP={"t":0.0,"v":set()}
 LOCK=threading.Lock(); ML=threading.RLock()
 ENV={"LC_ALL":"C","PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
+# An account = type (direct / tunnel) x connection (both / normal only / TLS only). The login shell encodes it and every Dropbear
+# instance lists only the shells it serves in its own /etc/shells (see the systemd units), so e.g. a TLS-only account is refused on the plain ports.
+SHELLS={("direct","both"):SHELL,("tunnel","both"):SHELL_T,("direct","normal"):SHELL+"-n",("tunnel","normal"):SHELL+"-tn",
+        ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts"}
+SHELL_OF={v:k for k,v in SHELLS.items()}
+TLS_BACKENDS=6                                   # Dropbear processes per TLS instance (keep in line with scripts/start-dropbear.sh)
+def shell_for(tm,cx): return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
+def is_tun(sh): return SHELL_OF.get(sh,("direct",""))[0]=="tunnel"
+SSHDENY="/etc/ssh/sshd_config.d/02-sshplus-deny.conf"
 
 def cmd(c,t=15):
   try:
@@ -79,12 +88,12 @@ def foreign_ports():
   return {p for p,n in listen_ports().items() if not n<={"dropbear","sshd"}}
 
 def passwd_map():
-  # panel accounts: name -> (uid, shell). shell SHELL = direct account, SHELL_T = tunnel account
+  # panel accounts: name -> (uid, shell). The shell tells the account type (direct/tunnel) and connection (both/normal/tls), see SHELLS
   m={}
   try:
     for l in open("/etc/passwd"):
       p=l.strip().split(":")
-      if len(p)>=7 and p[2].isdigit() and int(p[2])>=1000 and p[6] in (SHELL,SHELL_T): m[p[0]]=(int(p[2]),p[6])
+      if len(p)>=7 and p[2].isdigit() and int(p[2])>=1000 and p[6] in SHELL_OF: m[p[0]]=(int(p[2]),p[6])
   except Exception: pass
   return m
 
@@ -123,7 +132,7 @@ def _on_map():
   um=user_uid_map()
   sessions={u:[] for u in um}; io_pids={u:set() for u in um}
   _,o,_=cmd(["ps","-eo","pid,ppid,user:32,comm,args","--no-headers"])
-  rows=[]; masters=set()
+  rows=[]; masters=set(); launchers=set()
   for l in o.splitlines():
     p=l.split(None,4)
     if len(p)<4 or not p[0].isdigit() or not p[1].isdigit(): continue
@@ -131,7 +140,9 @@ def _on_map():
     args=p[4] if len(p)>4 else ""
     rows.append((pid,ppid,usr,comm,args))
     if ppid==1 and comm in ("sshd","dropbear"): masters.add(pid)
+    if comm.startswith("start-dropbear"): launchers.add(pid)                 # TLS back ends: several Dropbear masters under one launcher script
 
+  masters|={pid for pid,ppid,_,comm,_ in rows if comm=="dropbear" and ppid in launchers}
   for pid,ppid,usr,comm,args in rows:
     if usr in um:
       io_pids[usr].add(pid)
@@ -159,18 +170,28 @@ def _on_map():
   wset=set(workers); now=time.time()
   for k in [k for k in DBU if k not in wset]: DBU.pop(k,None)
   for k in [k for k in DBT if k not in wset]: DBT.pop(k,None)
+  for k in [k for k in DBA if k not in wset]: DBA.pop(k,None)
   unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>15]
   if unknown:
     for p in unknown: DBT[p]=now
-    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-n","3000","--no-pager","-o","cat"],20)
+    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-n","3000","--no-pager","-o","cat"],20)
     for jl in j.splitlines():
-      mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)'",jl)
-      if mt: DBU[int(mt.group(1))]=mt.group(2)
+      mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)' from (\S+):(\d+)\s*$",jl)
+      if mt: DBU[int(mt.group(1))]=mt.group(2); DBA[int(mt.group(1))]=(mt.group(3),int(mt.group(4)))
+  ips={}; cip=None
   for dpid in workers:
     u=DBU.get(dpid)
     if u in um:
       io_pids[u].add(dpid)
       if dpid not in sessions[u]: sessions[u].append(dpid)
+      a=DBA.get(dpid)
+      if a:
+        ip=a[0]
+        if ip=="127.0.0.1":                                         # TLS: the real client address is in stunnel's log
+          if cip is None: cip=tls_client_ips()
+          ip=cip.get(a[1],"")
+        if ip: ips.setdefault(u,set()).add(ip)
+  IPS.clear(); IPS.update({k:sorted(v) for k,v in ips.items()})
   return ({k:v for k,v in sessions.items() if v},{k:list(v) for k,v in io_pids.items() if v})
 
 def on_map(force=False):
@@ -241,7 +262,7 @@ def get_users(om):
     m=meta.get(u,{}); q=float(m.get("q",0)); ub=int(m.get("u",0))
     res.append({"u":u,"pw":dec(m.get("pw","")),"lim":int(m.get("lim",lim.get(u,1))),"on":om.get(u,0),"exp":es,"dl":dl,
                 "expd":expd,"q":q,"ugb":fmt_traffic(ub),"qfull":(q>0 and ub>=int(q*1073741824)),
-                "pt":str(m.get("pt","All")),"tm":"tunnel" if pm[u][1]==SHELL_T else "direct","en":"B" if m.get("en")=="B" else "A","st":m.get("tok","")})
+                "pt":str(m.get("pt","All")),"tm":"tunnel" if is_tun(pm[u][1]) else "direct","cx":SHELL_OF.get(pm[u][1],("direct","both"))[1],"en":"B" if m.get("en")=="B" else "A","st":m.get("tok",""),"ips":IPS.get(u,[])})
   return res
 
 def refresh_lock(u):
@@ -261,9 +282,10 @@ def user_save(d):
   if edit and u not in um: return 404,{"ok":0,"msg":"User not found"}
   if not edit and not pw: return 400,{"ok":0,"msg":"Password required"}
   if not edit and days<=0: days=30
-  cur=pm.get(u,(0,SHELL))[1]; tmq=str(d.get("tm",""))
-  shl=SHELL_T if tmq=="tunnel" else (SHELL if tmq=="direct" else cur)       # account type = login shell
-  if shl==SHELL_T and cur!=SHELL_T and not tconf().get("TUN_HOST"):
+  cur=pm.get(u,(0,SHELL))[1]; ctm,ccx=SHELL_OF.get(cur,("direct","both")); tmq=str(d.get("tm","")); cxq=str(d.get("cx",""))
+  tm=tmq if tmq in ("tunnel","direct") else ctm; cx=cxq if cxq in ("both","normal","tls") else ccx
+  shl=shell_for(tm,cx)                          # account type + connection type = login shell
+  if tm=="tunnel" and ctm!="tunnel" and not tconf().get("TUN_HOST"):
     return 400,{"ok":0,"msg":"Tunnel is not set up yet (open the Tunnel tab first)"}
   enq=str(d.get("en","")).upper()
   en="B" if enq=="B" else ("A" if enq=="A" else rjson(META,{}).get(u,{}).get("en","A"))   # A = this server, B = second server
@@ -293,8 +315,8 @@ def user_save(d):
     if not m.get("tok"): m["tok"]=secrets.token_hex(12)
     if d.get("rst"): m["u"]=0
     wjson(META,meta)
-  refresh_lock(u)
-  return 200,{"ok":1}
+  refresh_lock(u); sshd_deny_sync()
+  return 200,({"ok":1,"warn":"tls_off"} if cx!="normal" and not tls_cfg()["on"] else {"ok":1})
 
 def user_del(d):
   u=str(d.get("u","")).strip()
@@ -306,7 +328,28 @@ def user_del(d):
     ls=read_limits_db(); ls.pop(u,None); write_limits_db(ls)
     meta=rjson(META,{}); meta.pop(u,None); wjson(META,meta)
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   return 200,{"ok":1}
+
+def sshd_deny_sync():
+  # TLS-only accounts must not log in on the OpenSSH ports either (OpenSSH does not look at the per-instance /etc/shells)
+  names=sorted(u for u,(_,sh) in passwd_map().items() if SHELL_OF.get(sh,("","both"))[1]=="tls")
+  want=("# generated by the CK.VPN panel: TLS-only accounts\nDenyUsers "+" ".join(names)+"\n") if names else ""
+  try:
+    with open(SSHDENY) as f: cur=f.read()
+  except Exception: cur=""
+  if cur==want: return
+  try:
+    if want:
+      with open(SSHDENY,"w") as f: f.write(want)
+    elif os.path.exists(SSHDENY): os.remove(SSHDENY)
+    if cmd(["sshd","-t"])[0]!=0:                                   # never leave a broken sshd config behind
+      if cur:
+        with open(SSHDENY,"w") as f: f.write(cur)
+      elif os.path.exists(SSHDENY): os.remove(SSHDENY)
+      return
+    if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
+  except Exception: pass
 
 # ---------- ports & BadVPN ----------
 def apply_ports(d):
@@ -317,7 +360,7 @@ def apply_ports(d):
   bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
   managed={22,to_port(old.get("ssh")),to_port(old.get("ssh2"))}
   extra=sshd_ports()-managed-ssh_set          # e.g. 9011, defined outside the panel
-  reserved=ssh_set|extra|{panel,bvp,bvp+1,2053}|foreign_ports()
+  reserved=ssh_set|extra|{panel,bvp,bvp+1,2053}|foreign_ports()|tls_taken()
   db=[]; dropped=[]
   for x in d.get("db",[]):
     if str(x).strip()=="": continue
@@ -354,14 +397,14 @@ def apply_ports(d):
 def save_bv(d):
   p=to_port(d.get("p")) or 7300
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[]})
-  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()
+  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|tls_taken()
   if p in used or p+1 in used or p+1>65535: return 400,{"ok":0,"msg":"Port (or port+1, used by the tunnel UDPGW) is already used by SSH/Dropbear/panel"}
   m=min(max(int(float(d.get("m") or 1200)),576),1500)
   c=min(max(int(float(d.get("c") or 1000)),1),10000)
   n=min(max(int(float(d.get("n") or 64)),1),1000)
-  b=str(d.get("b","127.0.0.1")); b=b if b in ("127.0.0.1","0.0.0.0") else "127.0.0.1"
+  b=str(d.get("b","127.0.0.1")); b=b if b in ("127.0.0.1","0.0.0.0") else "127.0.0.1"  # nosec B104 - the admin may choose to expose UDPGW
   open(BV,"w").write(f"UDP_PORT={p}\nBIND_ADDR={b}\nUDP_MTU={m}\nMAX_CLIENTS={c}\nMAX_CONN={n}\nSEND_BUFFER=65536\nMSS_CLAMP=1\n")
-  if b=="0.0.0.0": ufw_open({p})
+  if b=="0.0.0.0": ufw_open({p})  # nosec B104
   cmd(["systemctl","restart","badvpn"]); cmd(["systemctl","restart","badvpn-t"])
   if os.path.exists(TNET): cmd([TNET,"sync"])          # UDPGW redirect for tunnel accounts follows the new port
   return 200,{"ok":1}
@@ -474,7 +517,7 @@ def tconf_write(d):
   os.chmod(t,0o600); os.replace(t,TCONF)
 
 def tun_users():
-  return sorted(u for u,(_,sh) in passwd_map().items() if sh==SHELL_T)
+  return sorted(u for u,(_,sh) in passwd_map().items() if is_tun(sh))
 
 def tunnel_status(full=False):
   c=tconf(); conf=bool(c.get("TUN_HOST"))
@@ -629,7 +672,8 @@ def tunnel_setup_run(host,port,user,pw):
 def rev_ports():
   # panel-server ports that can be reached through the exit server's IP: Dropbear ports (direct + tunnel) + 2nd OpenSSH port
   pc=rjson(PORTS,{}); out=[]
-  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]:
+  tl=tls_cfg(); extra=(tl["ports"]+tl["tports"]) if tl["on"] else []              # SSH over TLS: the public TLS ports too
+  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]+extra:
     v=to_port(x)
     if v and v!=22 and v not in out: out.append(v)
   return out
@@ -638,7 +682,7 @@ def ports_autofix():
   # Dropbear ports (direct + tunnel) that another program already listens on are replaced by free ports
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[],"tdb":[]}); lis=listen_ports(); foreign=foreign_ports()
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))
+  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))|tls_taken()
   changes=[]
   for key in ("db","tdb"):
     out=[]
@@ -716,7 +760,7 @@ def ports_sync():
   # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
   rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
   pc=rjson(PORTS,{})
-  rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports())
+  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
   if tconf().get("TUN_HOST"):
     c,r=tunnel_route_apply("both")
     if r.get("ok"): rep["map"]=r["map"]; rep["skipped"]=r["skipped"]; rep["fw_b"]=r.get("fw_b","none")
@@ -761,11 +805,12 @@ def tunnel_remove():
     except Exception: pass
   _,io=on_map(True); n=0
   for u,(_,sh) in passwd_map().items():
-    if sh==SHELL_T:                     # keep these accounts alive as direct accounts
-      cmd(["usermod","-s",SHELL,u]); n+=1
+    if is_tun(sh):                      # keep these accounts alive as direct accounts (same connection type)
+      cmd(["usermod","-s",shell_for("direct",SHELL_OF[sh][1]),u]); n+=1
       for pid in io.get(u,[]): kill_pid(pid)
   tunnel_rollback()
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   with TSL: TS["steps"]=[]; TS["ok"]=None
   return 200,{"ok":1,"converted":n}
 
@@ -777,12 +822,15 @@ def mon():
       if n%5==0:
         svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"]
         if tconf().get("TUN_HOST"): svs.append("sshplus-tunnel")
+        if tls_cfg()["on"]: svs+=list(TLS_SVC)
         for srv in svs:
           if cmd(["systemctl","is-active",srv])[0]!=0:
             cmd(["systemctl","reset-failed",srv]); cmd(["systemctl","restart",srv])
       n+=1
-      if n==4: threading.Thread(target=ports_sync,daemon=True).start()     # once per panel start / update
+      if n==4:                                                             # once per panel start / update
+        threading.Thread(target=ports_sync,daemon=True).start(); sshd_deny_sync()
       if n%20==0:                                                          # every minute: history + Telegram alerts
+        stunnel_log_trim()
         try: alerts_tick(hist_tick())
         except Exception: pass
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
@@ -902,14 +950,396 @@ def cert_save(d):
     return 400,{"ok":0,"msg":"Certificate/key rejected: "+str(e)[:100]}
   os.replace(t1,CERT); os.replace(t2,CKEY)
   if SRV[0] is not None: SRV[0].ctx=ctx
+  tls_reload()                                   # the SSH-TLS front uses the same certificate
   return 200,{"ok":1}
 
 def must_change():
   return str(rjson(CFG,{"password":"admin"}).get("password","admin")).strip()=="admin"
 
+# ---- 8) SSH over TLS: stunnel (public) -> Dropbear on 127.0.0.1 (one instance per account type).
+#         The certificate + domain are shared with the panel's own HTTPS, so there is a single place to manage them.
+TLSC="/etc/SSHPlus/tls.json"; STUN_CONF="/etc/SSHPlus/stunnel.conf"; ETC_SHELLS="/etc/shells"; SHELLS_DIR="/etc/SSHPlus"; TLSFW="/usr/local/bin/sshplus-tls-fw"; STUNLOG="/var/log/sshplus/stunnel.log"
+TLS_SVC=("sshplus-dropbear-s","sshplus-dropbear-ts","sshplus-stunnel")
+HOOK_PATH="/etc/letsencrypt/renewal-hooks/deploy/ckvpn.sh"
+TJ={"run":False,"steps":[],"ok":None,"domain":""}; TJL=threading.Lock(); TAL=threading.Lock()
+DOM_RE=re.compile(r"^(?=.{4,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\Z")
+DUCK_RE=re.compile(r"^[a-z0-9][a-z0-9-]{0,62}\Z"); DUCKTOK_RE=re.compile(r"^[0-9A-Fa-f-]{8,64}\Z")
+MAIL_RE=re.compile(r"^[^@\s\"']{1,64}@[^@\s\"']{1,200}\.[^@\s\"']{2,24}\Z")
+WILD={"sslip":"sslip.io","nip":"nip.io"}          # wildcard-DNS services: <ip-with-dashes>.<suffix> resolves to that IP (no account needed)
+DUCK_URL=os.environ.get("SSHPLUS_DUCK_URL","https://www.duckdns.org/update")
+
+def tls_cfg():
+  d=rjson(TLSC,{})
+  def pl(k,df):
+    out=[]
+    for x in d.get(k,df):
+      v=to_port(x)
+      if v and v not in out: out.append(v)
+    return out[:3]
+  md=d.get("mode") if d.get("mode") in ("self","own","free") else "self"
+  try: pi=max(0,min(10000,int(d.get("perip",100))))              # max concurrent connections per client IP on the TLS ports (0 = no limit)
+  except Exception: pi=100
+  return {"on":bool(d.get("on")),"ports":pl("ports",[443]),"tports":pl("tports",[8843]),"bd":to_port(d.get("bd")) or 40100,"bt":to_port(d.get("bt")) or 40120,
+          "mode":md,"domain":str(d.get("domain","")),"prov":str(d.get("prov","")),"suffix":str(d.get("suffix","")),"duckname":str(d.get("duckname","")),
+          "duck":bool(d.get("duck")),"email":str(d.get("email","")),"staging":bool(d.get("staging")),
+          "perip":pi}
+
+def tls_back_ports(c):
+  return set(range(c["bd"],c["bd"]+TLS_BACKENDS))|set(range(c["bt"],c["bt"]+TLS_BACKENDS))
+
+def tls_taken(c=None):
+  # ports this feature owns (public TLS ports + the local Dropbear back ends): other settings must not use them
+  c=c or tls_cfg(); return set(c["ports"])|set(c["tports"])|tls_back_ports(c)
+
+def tls_reserved(c=None):
+  c=c or tls_cfg(); pc=rjson(PORTS,{})
+  panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
+  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|sshd_ports()
+
+def cert_meta():
+  rc,o,_=cmd(["openssl","x509","-in",CERT,"-noout","-subject","-issuer","-enddate"])
+  if rc!=0: return {}
+  m={}
+  for l in o.splitlines():
+    k,_,v=l.partition("="); m[k.strip()]=v.strip()
+  cn=re.search(r"CN\s*=\s*([^,/]+)",m.get("subject","")); left=None
+  try: left=(datetime.strptime(re.sub(r"\s+"," ",m.get("notAfter","")),"%b %d %H:%M:%S %Y GMT")-datetime.utcnow()).days
+  except Exception: pass
+  return {"cn":cn.group(1).strip() if cn else "","issuer":m.get("issuer",""),"self":m.get("issuer","x")==m.get("subject","y"),"days":left,"end":m.get("notAfter","")}
+
+def have(name): return shutil.which(name,path=ENV["PATH"]) is not None
+
+def tls_brief():
+  c=tls_cfg()
+  return {"on":c["on"],"up":c["on"] and cmd(["systemctl","is-active","sshplus-stunnel"])[0]==0,"ports":c["ports"],"tports":c["tports"],"dom":c["domain"]}
+
+def tj_snap():
+  with TJL: return {"run":TJ["run"],"ok":TJ["ok"],"domain":TJ["domain"],"steps":[dict(x) for x in TJ["steps"]]}
+
+def tj_begin(m):
+  with TJL: TJ["steps"].append({"m":m,"s":"run","d":""})
+
+def tj_end(ok,d=""):
+  st={True:"ok",False:"err","warn":"warn"}[ok]
+  with TJL:
+    if TJ["steps"]: TJ["steps"][-1]["s"]=st; TJ["steps"][-1]["d"]=str(d)[:500]
+
+_CIP={"t":0.0,"v":{}}
+def tls_client_ips():
+  # local source port stunnel used towards Dropbear -> the real client address (from stunnel's own log)
+  if time.time()-_CIP["t"]<4: return _CIP["v"]
+  conns={}; res={}
+  try:
+    with open(STUNLOG,"rb") as f:
+      f.seek(0,2); n=f.tell(); f.seek(max(0,n-400000)); data=f.read().decode("utf-8","replace")
+    for l in data.splitlines():
+      m=re.search(r"LOG5\[(\d+)\]: Service \[[^\]]+\] accepted connection from (\S+)$",l)
+      if m: conns[m.group(1)]=m.group(2).rsplit(":",1)[0]; continue
+      m=re.search(r"LOG5\[(\d+)\]: Service \[[^\]]+\] connected remote server from 127\.0\.0\.1:(\d+)$",l)
+      if m and m.group(1) in conns: res[int(m.group(2))]=conns[m.group(1)]
+  except Exception: pass
+  _CIP["t"]=time.time(); _CIP["v"]=res; return res
+
+def stunnel_log_trim():
+  try:
+    if os.path.getsize(STUNLOG)>8*1048576: os.truncate(STUNLOG,0)
+  except OSError: pass
+
+def tls_manual_text(x):
+  # everything an app that has no import link needs, plus an OpenSSH one-liner
+  t=x.get("tls")
+  if not t: return ""
+  h=t["host"]; sni=t.get("sni") or ""
+  return ("SSH over TLS\nHost: %s\nTLS port(s): %s\nSNI: %s\nUsername: %s\nPassword: %s\nAllow untrusted certificate: %s\n"
+          "OpenSSH: ssh -o ProxyCommand=\"openssl s_client -quiet -connect %s:%d%s\" %s@%s")%(
+          h,", ".join(map(str,t["ports"])),sni or "-",x["u"],x["pw"],"yes (self-signed)" if t.get("insecure") else "no",
+          h,t["ports"][0]," -servername "+sni if sni else "",x["u"],h)
+
+def tls_state():
+  c=tls_cfg(); svc={s:(cmd(["systemctl","is-active",s])[0]==0) for s in TLS_SVC}; lis=listen_ports()
+  return {"cfg":c,"svc":svc,"up":c["on"] and all(svc.values()),"cert":cert_meta(),"https":bool(SRV[0] and SRV[0].ctx is not None),
+          "ports_up":{str(p):(p in lis) for p in sorted(c["ports"]+c["tports"])},"installed":{"stunnel":have("stunnel"),"certbot":have("certbot")},
+          "job":tj_snap(),"fer":HAVE_FERNET}
+
+def tls_shell_files():
+  # per-instance /etc/shells: a Dropbear instance only accepts the account shells it is meant to serve
+  try: base=[l.rstrip("\n") for l in open(ETC_SHELLS)]
+  except Exception: base=["/bin/sh","/bin/bash"]
+  mine=set(SHELLS.values()); clean=[l for l in base if l and l not in mine]
+  allow={"direct":("direct","normal"),"tunnel":("tunnel","normal"),"tlsd":("direct","tls"),"tlst":("tunnel","tls")}
+  for k,(tm,cx) in allow.items():
+    fp=os.path.join(SHELLS_DIR,"shells."+k)
+    with open(fp,"w") as f: f.write("\n".join(clean+[SHELLS[(tm,"both")],SHELLS[(tm,cx)]])+"\n")
+    os.chmod(fp,0o644)
+
+def stunnel_write(c):
+  L=["; generated by the CK.VPN panel - changes are overwritten","foreground = yes","pid =","debug = 5","output = "+STUNLOG,"sslVersionMin = TLSv1.2",
+     "socket = l:TCP_NODELAY=1","socket = r:TCP_NODELAY=1"]
+  for kind,ports,bp in (("d",c["ports"],c["bd"]),("t",c["tports"],c["bt"])):
+    for p in ports:
+      L+=["","[tls-%s-%d]"%(kind,p),"accept = 0.0.0.0:%d"%p]+["connect = 127.0.0.1:%d"%(bp+i) for i in range(TLS_BACKENDS)]+["failover = rr","TIMEOUTbusy = 30","cert = "+CERT,"key = "+CKEY]
+  t=STUN_CONF+".t"
+  with open(t,"w") as f: f.write("\n".join(L)+"\n")
+  os.chmod(t,0o600); os.replace(t,STUN_CONF)
+
+def tls_backends(c):
+  # first ports of the two blocks of local Dropbear back ends: keep the current ones unless something else listens there
+  lis=listen_ports(); res=tls_reserved(c)-tls_back_ports(c)
+  def block_free(b,avoid): return all(p not in res and p not in avoid and (p not in lis or lis[p]<={"dropbear"}) for p in range(b,b+TLS_BACKENDS))
+  bd=c["bd"]
+  if not block_free(bd,set()): bd=next((b for b in range(40100,40900,TLS_BACKENDS+2) if block_free(b,set())),bd)
+  own=set(range(bd,bd+TLS_BACKENDS)); bt=c["bt"]
+  if not block_free(bt,own): bt=next((b for b in range(bd+TLS_BACKENDS+2,40990,TLS_BACKENDS+2) if block_free(b,own)),bt)
+  return bd,bt
+
+def tls_reload():
+  c=tls_cfg()
+  if not c["on"] or not os.path.exists(STUN_CONF): return
+  stunnel_write(c)
+  if cmd(["systemctl","reload","sshplus-stunnel"])[0]!=0: cmd(["systemctl","restart","sshplus-stunnel"])
+
+def tls_apply(d):
+  with TAL: return _tls_apply(d)
+
+def _tls_apply(d):
+  c=tls_cfg(); on=bool(d["on"]) if "on" in d else c["on"]; d0=rjson(TLSC,{}); dropped=[]
+  front=("ports" in d or "tports" in d or on!=c["on"])                     # does the TLS front itself change? (a limit / staging change must not drop sessions)
+  if "domain" in d:
+    dom=str(d.get("domain","")).strip().lower()
+    if dom and not DOM_RE.match(dom): return 400,{"ok":0,"msg":"Invalid domain name"}
+    d0["domain"]=dom; d0["mode"]="own" if dom and not cert_meta().get("self",True) else "self"   # "own" only once a real certificate is installed
+  if "perip" in d:
+    try: pi=int(str(d["perip"]).strip() or 0)
+    except Exception: return 400,{"ok":0,"msg":"Invalid per-IP limit (a number, 0 = no limit)"}
+    if not 0<=pi<=10000: return 400,{"ok":0,"msg":"Invalid per-IP limit (0..10000, 0 = no limit)"}
+    d0["perip"]=pi
+  if "staging" in d: d0["staging"]=bool(d["staging"])
+  if "ports" in d or "tports" in d:
+    res=tls_reserved(c); foreign={p for p,n in listen_ports().items() if not n<={"dropbear","sshd","stunnel"}}; new={}; used=set()
+    for key in ("ports","tports"):
+      out=[]
+      for x in (d[key] if key in d else c[key]):
+        if str(x).strip()=="": continue
+        v=to_port(x)
+        if v and v not in res and v not in foreign and v not in used and v not in out: out.append(v); used.add(v)
+        else: dropped.append(str(x))
+      new[key]=out[:3]
+    if not new["ports"]: return 400,{"ok":0,"msg":"At least one valid TLS port for normal accounts is required (443 is the usual choice)"}
+    if not new["tports"]: return 400,{"ok":0,"msg":"At least one valid TLS port for tunnel accounts is required"}
+    c.update(new)
+  if on:
+    if not have("stunnel"):
+      _run(["apt-get","install","-y","stunnel4"],env=dict(ENV,DEBIAN_FRONTEND="noninteractive"),t=240)
+      cmd(["systemctl","disable","--now","stunnel4"],30)                       # the package's own generic service is not used
+      if not have("stunnel"): return 500,{"ok":0,"msg":"stunnel4 could not be installed (apt-get install stunnel4)"}
+    if not ensure_cert(): return 500,{"ok":0,"msg":"No certificate available (openssl missing?)"}
+    c["bd"],c["bt"]=tls_backends(c)
+  d0.update({"on":on,"ports":c["ports"],"tports":c["tports"],"bd":c["bd"],"bt":c["bt"]}); wjson(TLSC,d0)
+  if on:
+    tls_shell_files(); stunnel_write(c); ufw_open(set(c["ports"])|set(c["tports"]))
+    if os.path.exists(TLSFW): cmd([TLSFW,"apply"])                      # per-IP connection limit (also applied again by the stunnel unit)
+    if front or not all(cmd(["systemctl","is-active",x])[0]==0 for x in TLS_SVC):
+      for s in TLS_SVC[:2]: cmd(["systemctl","enable",s]); cmd(["systemctl","restart",s],20)
+      cmd(["systemctl","enable",TLS_SVC[2]]); cmd(["systemctl","restart",TLS_SVC[2]],20)
+      end=time.time()+12; want=set(c["ports"])|set(c["tports"])|tls_back_ports(c)       # the public ports AND every Dropbear back end
+      while time.time()<end and not want<=set(listen_ports()): time.sleep(0.5)
+      miss=sorted(want-set(listen_ports()))
+      if miss:
+        _,j,_=cmd(["journalctl","-u","sshplus-stunnel","-n","4","--no-pager","-o","cat"],10)
+        return 500,{"ok":0,"msg":"TLS front did not start on port(s) %s: %s"%(",".join(map(str,miss)),(j or "see: journalctl -u sshplus-stunnel")[-160:])}
+  else:
+    for s in reversed(TLS_SVC): cmd(["systemctl","stop",s],20); cmd(["systemctl","disable",s],20)
+  if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()     # publish / withdraw the TLS ports on the exit server
+  return 200,{"ok":1,"dropped":dropped,"on":on}
+
+def tls_selfsign():
+  # back to a self-signed certificate (no domain)
+  for f in (CERT,CKEY):
+    try: os.remove(f)
+    except OSError: pass
+  if not ensure_cert(): return 500,{"ok":0,"msg":"openssl failed"}
+  if SRV[0] is not None:
+    try: SRV[0].ctx=tls_ctx()
+    except Exception: pass
+  d0=rjson(TLSC,{}); d0.update({"mode":"self","domain":""}); wjson(TLSC,d0); tls_reload()
+  return 200,{"ok":1}
+
+# ---- free domain + Let's Encrypt certificate in one click
+def pub_ip():
+  urls=[os.environ["SSHPLUS_IPCHECK_URL"]] if os.environ.get("SSHPLUS_IPCHECK_URL") else ["https://api.ipify.org","https://ipv4.icanhazip.com"]
+  for u in urls:
+    rc,o,_=cmd(["curl","-4","-sfL","--max-time","6",u],10)
+    if rc==0 and re.match(r"^\d{1,3}(\.\d{1,3}){3}$",o.strip()): return o.strip(),True
+  rc,o,_=cmd(["ip","-4","route","get","1.1.1.1"]); m=re.search(r"src (\d+\.\d+\.\d+\.\d+)",o)
+  if m:
+    import ipaddress
+    return m.group(1),not ipaddress.ip_address(m.group(1)).is_private
+  return "",False
+
+def dns_ips(host):
+  try: return sorted({r[4][0] for r in socket.getaddrinfo(host,None,socket.AF_INET)})
+  except Exception: return []
+
+def wait_dns(host,ip,secs):
+  end=time.time()+secs
+  while True:
+    got=dns_ips(host)
+    if ip in got or time.time()>=end: return got
+    time.sleep(3)
+
+def duck_update(name,token,ip):
+  rc,o,er=_run(["curl","-sS","--max-time","20","-K","-"],inp='url = "%s?domains=%s&token=%s&ip=%s"\n'%(DUCK_URL,name,token,ip),t=30)
+  return (rc==0 and o.strip().startswith("OK")),(o or er)[:80]
+
+def free_name(prov,ip,p):
+  # the domain a free provider gives for this server
+  if prov in WILD: return ip.replace(".","-")+"."+WILD[prov]
+  if prov=="custom": return ip.replace(".","-")+"."+p["suffix"]
+  if prov=="duckdns": return p["duckname"]+".duckdns.org"
+  return ""
+
+def le_dir(): return os.environ.get("SSHPLUS_LE_DIR","/etc/letsencrypt")
+
+def write_hook():
+  os.makedirs(os.path.dirname(HOOK_PATH),exist_ok=True)
+  with open(HOOK_PATH,"w") as f: f.write('#!/bin/sh\n# CK.VPN: after a renewal copy the new certificate to the panel + the TLS front\nexec /usr/bin/python3 /opt/sshplus-panel/app.py --cert-renewed "${RENEWED_LINEAGE:-}"\n')
+  os.chmod(HOOK_PATH,0o755)  # nosec B103 - root-owned hook that certbot has to execute
+
+def tls_issue_start(d):
+  mode=str(d.get("mode",""))
+  if mode not in ("own","free"): return 400,{"ok":0,"msg":"Choose own domain or free domain"}
+  email=str(d.get("email","")).strip()
+  if email and not MAIL_RE.match(email): return 400,{"ok":0,"msg":"Invalid e-mail address"}
+  p={"mode":mode,"email":email,"domain":"","prov":"","suffix":"","duckname":"","duck":""}
+  if mode=="own":
+    p["domain"]=str(d.get("domain","")).strip().lower()
+    if not DOM_RE.match(p["domain"]): return 400,{"ok":0,"msg":"Invalid domain name"}
+  else:
+    p["prov"]=str(d.get("prov","")); old=rjson(TLSC,{})
+    if p["prov"] not in ("sslip","nip","duckdns","custom"): return 400,{"ok":0,"msg":"Unknown free-domain provider"}
+    if p["prov"]=="custom":
+      p["suffix"]=str(d.get("suffix","")).strip().lower().strip(".")
+      if not DOM_RE.match("x."+p["suffix"]): return 400,{"ok":0,"msg":"Invalid wildcard-DNS suffix (e.g. sslip.io)"}
+    if p["prov"]=="duckdns":
+      p["duckname"]=str(d.get("duckname","")).strip().lower().replace(".duckdns.org","")
+      tk=str(d.get("duck","")).strip() or (dec(old.get("duck","")) if old.get("duck") else "")
+      if not DUCK_RE.match(p["duckname"]): return 400,{"ok":0,"msg":"Invalid DuckDNS sub-domain (letters, digits, dashes)"}
+      if not DUCKTOK_RE.match(tk): return 400,{"ok":0,"msg":"DuckDNS token is required (copy it from your duckdns.org account page)"}
+      p["duck"]=tk
+  with TJL:
+    if TJ["run"]: return 409,{"ok":0,"msg":"A certificate request is already running"}
+    TJ["run"]=True; TJ["steps"]=[]; TJ["ok"]=None; TJ["domain"]=""
+  threading.Thread(target=tls_issue_run,args=(p,),daemon=True).start()
+  return 200,{"ok":1}
+
+def tls_issue_run(p):
+  ok=False
+  try: ok=_tls_issue(p)
+  except Exception as e:
+    tj_begin("Internal error"); tj_end(False,str(e)[:200])
+  with TJL: TJ["ok"]=bool(ok); TJ["run"]=False
+
+def _tls_issue(p):
+  tj_begin("Detecting the public IP of this server"); ip,pub=pub_ip()
+  if not ip: tj_end(False,"Could not detect the IP (no internet?)"); return False
+  if not pub and p["mode"]=="free": tj_end(False,ip+": a free domain needs a public IP address (the server seems to be behind NAT)"); return False
+  tj_end(True if pub else "warn",ip+("" if pub else "  (private address: the server seems to be behind NAT)"))
+  if p["mode"]=="own": dom=p["domain"]
+  else:
+    if p["prov"]=="duckdns":
+      tj_begin("Pointing %s.duckdns.org to %s (DuckDNS)"%(p["duckname"],ip)); ok,msg=duck_update(p["duckname"],p["duck"],ip)
+      if not ok: tj_end(False,"DuckDNS refused the update (%s). Check the token and that the sub-domain exists in your DuckDNS account."%(msg or "no answer")); return False
+      tj_end(True)
+    dom=free_name(p["prov"],ip,p)
+  with TJL: TJ["domain"]=dom
+  tj_begin("Checking that %s points to this server"%dom); got=wait_dns(dom,ip,45 if p["mode"]=="free" else 10)
+  if pub and ip not in got:
+    res=", ".join(got) or "nothing"
+    if p["mode"]=="free": tj_end(False,"%s resolves to %s, not to %s yet. The provider's DNS may be slow or down: try again in a minute, or choose another provider."%(dom,res,ip))
+    else: tj_end(False,"%s resolves to %s but this server is %s. Add an A record pointing to %s (if you use Cloudflare, set it to \"DNS only\") and try again."%(dom,res,ip,ip))
+    return False
+  tj_end(True if pub else "warn",", ".join(got) or "not checked")
+  if not have("certbot"):
+    tj_begin("Installing certbot (apt)")
+    env=dict(ENV,DEBIAN_FRONTEND="noninteractive")
+    rc,_,er=_run(["apt-get","install","-y","certbot"],env=env,t=300)
+    if rc!=0 or not have("certbot"):
+      _run(["apt-get","update","-y"],env=env,t=180); rc,_,er=_run(["apt-get","install","-y","certbot"],env=env,t=300)
+    if not have("certbot"): tj_end(False,"certbot could not be installed: "+er[-200:]); return False
+    tj_end(True)
+  tj_begin("Preparing port 80 (Let's Encrypt validates over HTTP)"); busy=listen_ports().get(80)
+  if busy: tj_end(False,"Port 80 is used by %s. Stop it temporarily, or upload a certificate manually."%", ".join(sorted(busy))); return False
+  ufw_open({80}); tj_end(True)
+  stg=bool(rjson(TLSC,{}).get("staging")); lin=dom+("-staging" if stg else "")           # staging = Let's Encrypt test CA: for trying the flow, the certificate is NOT trusted
+  tj_begin("Requesting the certificate from Let's Encrypt%s (about 30 seconds)"%(" STAGING" if stg else "")); write_hook()
+  args=["certbot","certonly","--standalone","--non-interactive","--agree-tos","--preferred-challenges","http","--keep-until-expiring",
+        "--cert-name",lin,"-d",dom,"--deploy-hook",HOOK_PATH]+(["--test-cert"] if stg else [])+(["--email",p["email"]] if p["email"] else ["--register-unsafely-without-email"])
+  rc,o,er=_run(args,t=240); out=(o+"\n"+er).strip()
+  if rc!=0:
+    hint=" Let's Encrypt is limiting this domain (shared free domains such as sslip.io / nip.io are used by many people): try another provider or your own domain." if re.search(r"rateLimited|too many certificates|rate limit",out,re.I) else ""
+    tj_end(False,"certbot failed:"+hint+" "+out[-300:]); return False
+  tj_end(True)
+  tj_begin("Installing the certificate (panel HTTPS + SSH-TLS)")
+  try:
+    live=os.path.join(le_dir(),"live",lin); c1=open(os.path.join(live,"fullchain.pem")).read(); k1=open(os.path.join(live,"privkey.pem")).read()
+  except Exception as e: tj_end(False,"certificate files not found: "+str(e)[:120]); return False
+  code,r=cert_save({"cert":c1,"key":k1})
+  if code!=200: tj_end(False,r.get("msg","rejected")); return False
+  d0=rjson(TLSC,{}); d0.update({"mode":p["mode"],"domain":dom,"prov":p["prov"],"suffix":p["suffix"],"duckname":p["duckname"],"email":p["email"]})
+  if p["duck"]: d0["duck"]=enc(p["duck"])
+  wjson(TLSC,d0); tj_end(True,dom+" - the certificate renews automatically (certbot timer)")
+  return True
+
+def tls_renew_start():
+  c=tls_cfg(); dom=c["domain"]
+  lin=dom+("-staging" if c["staging"] else "")
+  if c["mode"] not in ("own","free") or not dom or not os.path.isdir(os.path.join(le_dir(),"live",lin)):
+    return 400,{"ok":0,"msg":"There is no Let's Encrypt certificate from this panel to renew: use \"Get domain and certificate\" first"}
+  with TJL:
+    if TJ["run"]: return 409,{"ok":0,"msg":"A certificate request is already running"}
+    TJ["run"]=True; TJ["steps"]=[]; TJ["ok"]=None; TJ["domain"]=dom
+  threading.Thread(target=tls_renew_run,args=(lin,),daemon=True).start()
+  return 200,{"ok":1}
+
+def tls_renew_run(dom):
+  ok=False
+  try: ok=_tls_renew(dom)
+  except Exception as e:
+    tj_begin("Internal error"); tj_end(False,str(e)[:200])
+  with TJL: TJ["ok"]=bool(ok); TJ["run"]=False
+
+def _tls_renew(dom):
+  tj_begin("Preparing port 80 (Let's Encrypt validates over HTTP)"); busy=listen_ports().get(80)
+  if busy: tj_end(False,"Port 80 is used by %s. Stop it temporarily and try again."%", ".join(sorted(busy))); return False
+  ufw_open({80}); tj_end(True)
+  tj_begin("Renewing the certificate with Let's Encrypt (about 30 seconds)"); write_hook()
+  rc,o,er=_run(["certbot","renew","--cert-name",dom,"--force-renewal","--non-interactive","--deploy-hook",HOOK_PATH],t=240); out=(o+"\n"+er).strip()
+  if rc!=0:
+    hint=" Let's Encrypt is limiting this domain: try again later." if re.search(r"rateLimited|too many certificates|rate limit",out,re.I) else ""
+    tj_end(False,"certbot failed:"+hint+" "+out[-300:]); return False
+  tj_end(True)
+  tj_begin("Installing the renewed certificate (panel HTTPS + SSH-TLS)")
+  try:
+    live=os.path.join(le_dir(),"live",dom); c1=open(os.path.join(live,"fullchain.pem")).read(); k1=open(os.path.join(live,"privkey.pem")).read()
+  except Exception as e: tj_end(False,"certificate files not found: "+str(e)[:120]); return False
+  code,r=cert_save({"cert":c1,"key":k1})
+  if code!=200: tj_end(False,r.get("msg","rejected")); return False
+  m=cert_meta(); tj_end(True,"%s - valid until %s"%(dom,m.get("end","?"))); return True
+
+def cli_cert_renewed(lineage):
+  # called by the certbot deploy hook after a renewal
+  dom=str(rjson(TLSC,{}).get("domain","")); lineage=str(lineage).rstrip("/")
+  if not dom or os.path.basename(lineage) not in (dom,dom+"-staging"): return 0
+  try: c1=open(lineage+"/fullchain.pem").read(); k1=open(lineage+"/privkey.pem").read()
+  except Exception as e: print(e); return 1
+  code,r=cert_save({"cert":c1,"key":k1})
+  if code!=200: print(r.get("msg","")); return 1
+  cmd(["systemctl","--no-block","restart","sshplus-panel"])                  # the panel loads the certificate at start
+  return 0
+
 # ---- 2) encrypted backup / restore
 BK_MAGIC=b"CKBK1"
-BK_FILES=[CFG,PORTS,BV,META,TCONF,TKEY,TKEY+".pub",TKH,SECRETK,DB,TGC,TPL,HIST,CERT,CKEY]
+BK_FILES=[CFG,PORTS,BV,META,TCONF,TKEY,TKEY+".pub",TKH,SECRETK,DB,TGC,TPL,HIST,CERT,CKEY,TLSC]
 
 def bk_key(pw,salt): return base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256",pw.encode(),salt,200000,32))
 
@@ -940,7 +1370,7 @@ def restore_backup(raw,pw):
   _FER[0]=None
   n=0
   for x in d.get("users",[]):
-    u=str(x.get("u","")); shl=x.get("sh") if x.get("sh") in (SHELL,SHELL_T) else SHELL
+    u=str(x.get("u","")); shl=x.get("sh") if x.get("sh") in SHELL_OF else SHELL
     if not NAME_RE.match(u) or u in ("root","admin","ubuntu","nobody"): continue
     if cmd(["id","-u",u])[0]!=0:
       ea=[]
@@ -950,7 +1380,9 @@ def restore_backup(raw,pw):
     if x.get("h"): cmd(["usermod","-p",str(x["h"]),u])
     n+=1
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   for sv in ("sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"): cmd(["systemctl","restart",sv])
+  if tls_cfg()["on"]: threading.Thread(target=tls_apply,args=({"on":True},),daemon=True).start()
   if tconf().get("TUN_HOST"):
     cmd(["systemctl","restart","sshplus-tunnel"],30); threading.Thread(target=ports_sync,daemon=True).start()
   threading.Timer(3,lambda: cmd(["systemctl","--no-block","restart","sshplus-panel"])).start()      # reload settings / password / certificate
@@ -992,12 +1424,12 @@ def tg_send_backup(tag="backup"):
   if not (c.get("token") and c.get("chat") and c.get("bpass")): return False,"backup passphrase is not set"
   try: raw=make_backup(c["bpass"])
   except Exception as e: return False,str(e)
-  fn="/tmp/ckvpn-%s-%s.ckbk"%(tag,datetime.now().strftime("%Y%m%d-%H%M"))
-  fd=os.open(fn,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,raw); os.close(fd)
+  import tempfile
+  td=tempfile.mkdtemp(prefix="ckvpn-")                          # private (0700) directory: no predictable /tmp name for a local user to pre-create or symlink
+  fn=os.path.join(td,"ckvpn-%s-%s.ckbk"%(tag,datetime.now().strftime("%Y%m%d-%H%M")))
+  fd=os.open(fn,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,raw); os.close(fd)
   try: r=tg_call("sendDocument",{"chat_id":c["chat"],"caption":"CK.VPN backup (encrypted) v"+VERSION},file=fn,timeout=60)
-  finally:
-    try: os.remove(fn)
-    except OSError: pass
+  finally: shutil.rmtree(td,ignore_errors=True)
   return bool(r and r.get("ok")),("" if (r and r.get("ok")) else "Telegram unreachable")
 
 def tg_save(d):
@@ -1123,7 +1555,7 @@ def tpl_save(d):
   name=str(d.get("name","")).strip()[:40]
   if not name: return 400,{"ok":0,"msg":"Template name required"}
   t={"name":name,"d":max(1,int(float(d.get("d") or 30))),"q":max(0.0,float(d.get("q") or 0)),"l":max(1,int(float(d.get("l") or 1))),
-     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct"}
+     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct","cx":d.get("cx") if d.get("cx") in ("normal","tls") else "both"}
   ls=[x for x in tpl_list() if x.get("name")!=name]+[t]; wjson(TPL,ls[:60]); return 200,{"ok":1}
 
 def tpl_del(d):
@@ -1140,7 +1572,7 @@ def user_bulk(d):
   same=str(d.get("pw","")).strip(); width=len(str(start+count-1)); made=[]; errs=[]
   for i in range(count):
     name="%s%0*d"%(prefix,width,start+i); pw=same or rand_pw(8)
-    c,r=user_save({"u":name,"pw":pw,"d":d.get("d",30),"q":d.get("q",0),"l":d.get("l",1),"pt":"All","tm":d.get("tm","direct"),"en":d.get("en","A")})
+    c,r=user_save({"u":name,"pw":pw,"d":d.get("d",30),"q":d.get("q",0),"l":d.get("l",1),"pt":"All","tm":d.get("tm","direct"),"cx":d.get("cx","both"),"en":d.get("en","A")})
     if c==200: made.append({"u":name,"pw":pw})
     else: errs.append({"u":name,"msg":r.get("msg","")})
   return 200,{"ok":1,"created":made,"errors":errs}
@@ -1163,9 +1595,17 @@ def sub_data(u,hosthdr):
     ssh=[mp[s2]] if s2 in mp else []; dbl=[mp[p] for p in dbl if p in mp]
   else: ssh=sorted(sshd_ports())
   x.update({"host":host,"ssh":ssh,"db":dbl,"in":"B" if inB else "A","out":"B" if out else "A","exit":(tc["exit"] or tc["host"]) if out else host})
+  tl=tls_cfg(); x["tls"]=None
+  if tl["on"] and x.get("cx","both")!="normal":                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
+    tp=list(tl["tports" if out else "ports"])
+    if inB: mp2={r["a"]:r["b"] for r in tc["rev_map"]}; tp=[mp2[p] for p in tp if p in mp2]
+    if tp:
+      x["tls"]={"host":host if inB else (tl["domain"] or host),"ports":tp,"sni":tl["domain"],"insecure":tl["mode"]=="self"}
+      if x["cx"]=="tls": x["db"]=[]; x["ssh"]=[]                  # TLS-only account: do not offer the plain ports
   return x
 
 def ssh_uri(x):
+  if x.get("tls") and not (x["db"] or x["ssh"]): return ssh_uris(x)[0]
   p=(x["db"] or x["ssh"] or [22])[0]
   return "ssh://%s:%s@%s:%d#%s"%(quote(x["u"],safe=""),quote(x["pw"],safe=""),x["host"],p,quote("CK.VPN-"+x["u"],safe=""))
 
@@ -1177,6 +1617,12 @@ def ssh_uris(x,b64auth=False):
     seen.add(p)
     ui=quote(base64.b64encode(("%s:%s"%(x["u"],x["pw"])).encode()).decode(),safe="") if b64auth else "%s:%s"%(quote(x["u"],safe=""),quote(x["pw"],safe=""))
     out.append("ssh://%s@%s:%d#%s"%(ui,x["host"],p,quote("CK.VPN-%s-%d"%(x["u"],p),safe="")))
+  t=x.get("tls")
+  if t:                                            # SSH over TLS (there is no standard URI: security=tls + sni is the usual convention)
+    q="?security=tls"+("&sni="+quote(t["sni"],safe="") if t.get("sni") else "")+("&allowInsecure=1" if t.get("insecure") else "")
+    for p in t["ports"]:
+      ui=quote(base64.b64encode(("%s:%s"%(x["u"],x["pw"])).encode()).decode(),safe="") if b64auth else "%s:%s"%(quote(x["u"],safe=""),quote(x["pw"],safe=""))
+      out.append("ssh://%s@%s:%d%s#%s"%(ui,t["host"],p,q,quote("CK.VPN-%s-TLS-%d"%(x["u"],p),safe="")))
   return out or [ssh_uri(x)]
 
 def sub_list(u,hosthdr,fmt,auth):
@@ -1196,10 +1642,10 @@ def qr_svg(text):
 
 SUBT={"fa":{"dir":"rtl","title":"وضعیت اکانت","status":"وضعیت","ok":"فعال","bad":"منقضی/پر","exp":"انقضا","days":"روز","usage":"مصرف","unl":"نامحدود",
   "conc":"اتصال همزمان","info":"اطلاعات اتصال","host":"آدرس","user":"نام کاربری","pw":"رمز","ssh":"پورت‌های SSH","db":"پورت‌های Dropbear","exit":"IP خروجی",
-  "qr":"لینک و QR","cpl":"کپی لینک ssh","cpa":"کپی همه‌ی اطلاعات","copied":"کپی شد","other":"English"},
+  "qr":"لینک و QR","cpl":"کپی لینک ssh","cpa":"کپی همه‌ی اطلاعات","copied":"کپی شد","other":"English","tls":"پورت‌های TLS","insec":"گواهی self-signed است: در برنامه گزینه‌ی «اجازه به گواهی نامعتبر / Allow insecure» را روشن کنید."},
  "en":{"dir":"ltr","title":"Account status","status":"Status","ok":"Active","bad":"Expired/Full","exp":"Expires","days":"days","usage":"Usage","unl":"Unlimited",
   "conc":"Concurrent connections","info":"Connection info","host":"Host","user":"Username","pw":"Password","ssh":"SSH ports","db":"Dropbear ports","exit":"Exit IP",
-  "qr":"Link & QR","cpl":"Copy ssh link","cpa":"Copy all info","copied":"Copied","other":"فارسی"}}
+  "qr":"Link & QR","cpl":"Copy ssh link","cpa":"Copy all info","copied":"Copied","other":"فارسی","tls":"TLS ports","insec":"The certificate is self-signed: turn on \"Allow insecure\" in the app."}}
 SUBHTML='''<!DOCTYPE html><html lang="@@LANG@@" dir="@@DIR@@"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CK.VPN - @@USER@@</title><meta name="robots" content="noindex">
 <style>:root{--bg:#0b1120;--card:#111827;--bd:#1f2937;--tx:#f3f4f6;--mu:#9ca3af;--pr:#06b6d4;--ok:#10b981;--er:#ef4444;--wn:#f59e0b}
@@ -1220,7 +1666,7 @@ code{direction:ltr;display:inline-block;word-break:break-all;color:var(--pr)}.qr
 <div class="row"><span>@@T_host@@</span><code>@@HOST@@</code></div><div class="row"><span>@@T_user@@</span><code>@@USER@@</code></div><div class="row"><span>@@T_pw@@</span><code>@@PASS@@</code></div>
 <div class="row"><span>@@T_ssh@@</span><code>@@SSH@@</code></div><div class="row"><span>@@T_db@@</span><code>@@DB@@</code></div>
 <div class="row"><span>UDPGW</span><code>127.0.0.1:7300</code></div>
-<div class="row"><span>@@T_exit@@</span><code>@@EXIT@@</code></div></div>
+<div class="row"><span>@@T_exit@@</span><code>@@EXIT@@</code></div>@@TLSROWS@@</div>
 <div class="card" style="text-align:center"><h3>@@T_qr@@</h3><div class="qr">@@QR@@</div><div style="margin:.5rem 0"><code>@@URI@@</code></div>
 <button class="btn" onclick="cp(@@URIJS@@)">@@T_cpl@@</button><button class="btn" onclick="cp(@@ALLJS@@)">@@T_cpa@@</button></div>
 <script>function cp(t){var ok=function(){alert("@@T_copied@@")},fb=function(){try{var a=document.createElement("textarea");a.value=t;a.style.cssText="position:fixed;opacity:0";document.body.appendChild(a);a.focus();a.select();a.setSelectionRange(0,t.length);var r=document.execCommand("copy");a.remove();if(r){ok();return}}catch(e){}prompt("Copy:",t)};if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok,fb);else fb()}
@@ -1236,11 +1682,17 @@ def sub_page(u,hosthdr,lang="fa"):
   except Exception: pct=0
   bad=x["expd"] or x["qfull"]
   allt="Host: %s\nUser: %s\nPass: %s\nSSH ports: %s\nDropbear ports: %s\nUDPGW: 127.0.0.1:7300"%(x["host"],x["u"],x["pw"],", ".join(map(str,x["ssh"])) or "-",", ".join(map(str,x["db"])) or "-")
-  rep={"USER":esc_(x["u"]),"STCLS":"er" if bad else "ok","STTXT":T["bad"] if bad else T["ok"],"EXP":esc_(x["exp"]),"DL":x["dl"],"USED":esc_(used_txt),
+  tr=""; t=x.get("tls")
+  if t:
+    allt+="\n\n"+tls_manual_text(x)
+    tr='<div class="row"><span>%s</span><code>%s</code></div>'%(T["tls"],esc_(", ".join(map(str,t["ports"]))))
+    if t.get("sni"): tr+='<div class="row"><span>SNI</span><code>%s</code></div>'%esc_(t["sni"])
+    if t.get("insecure"): tr+='<div class="row" style="color:var(--wn);font-size:.8rem">%s</div>'%esc_(T["insec"])
+  rep={"TLSROWS":tr,"USER":esc_(x["u"]),"STCLS":"er" if bad else "ok","STTXT":T["bad"] if bad else T["ok"],"EXP":esc_(x["exp"]),"DL":x["dl"],"USED":esc_(used_txt),
        "QUOTA":("%g GB"%q) if q>0 else T["unl"],"PCT":pct,"LIM":x["lim"],"HOST":esc_(x["host"]),"PASS":esc_(x["pw"]),
        "SSH":esc_(", ".join(map(str,x["ssh"])) or "-"),"DB":esc_(", ".join(map(str,x["db"])) or "-"),"EXIT":esc_(x["exit"]),
        "QR":qr_svg(uri) or "<div style='color:#555;font-size:.8rem'>QR unavailable (python3-qrcode)</div>","URI":esc_(uri),
-       "URIJS":json.dumps(uri).replace("<","\\u003c"),"ALLJS":json.dumps(allt).replace("<","\\u003c")}
+       "URIJS":json.dumps(uri).replace("<","\\u003c").replace("\"","&quot;"),"ALLJS":json.dumps(allt).replace("<","\\u003c").replace("\"","&quot;")}
   h=SUBHTML.replace("@@LANG@@",lang).replace("@@DIR@@",T["dir"]).replace("@@OTHERLANG@@","fa" if lang=="en" else "en")
   for k,v in T.items(): h=h.replace("@@T_%s@@"%k,v)
   for k,v in rep.items(): h=h.replace("@@%s@@"%k,str(v))
@@ -1341,16 +1793,17 @@ class H(BaseHTTPRequestHandler):
       if p=="/api/sublinks":
         u=parse_qs(urlparse(s.path).query).get("u",[""])[0]; x=sub_data(u,s.headers.get("Host",""))
         if not x: s.js({"err":404},404); return
-        s.js({"ssh":ssh_uris(x),"sshb":ssh_uris(x,True),"plain_sub":bool(rjson(CFG,{}).get("plain_sub"))}); return
+        s.js({"ssh":ssh_uris(x),"sshb":ssh_uris(x,True),"plain_sub":bool(rjson(CFG,{}).get("plain_sub")),"tlsinfo":tls_manual_text(x)}); return
       if p=="/api/history": s.js(hist_get()); return
       if p=="/api/telegram": s.js(tg_state()); return
       if p=="/api/templates": s.js(tpl_list()); return
       if p=="/api/cert": s.js({"info":cert_info(),"https":bool(SRV[0] and SRV[0].ctx is not None),"plain_sub":bool(rjson(CFG,{}).get("plain_sub"))}); return
+      if p=="/api/tls": s.js(tls_state()); return
       if p=="/api/overview":
         st=stats(); bv=read_bv()
         pc=rjson(PORTS,{"ssh":22,"ssh2":2222,"db":[]}); pc["ssh_all"]=sorted(sshd_ports()); pc.setdefault("tdb",[])
         adm=str(rjson(CFG,{"username":"admin"}).get("username","admin")).strip()
-        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"tun":tunnel_status(False),"ver":VERSION,"fer":HAVE_FERNET,"qr":HAVE_QR,"users":get_users(st["om"])}); return
+        s.js({"st":st,"ports":pc,"bv":bv,"bbr":bbr_state(),"adm":adm,"tun":tunnel_status(False),"ver":VERSION,"fer":HAVE_FERNET,"qr":HAVE_QR,"tls":tls_brief(),"users":get_users(st["om"])}); return
       if p=="/api/tunnel": s.js(tunnel_status(True)); return
       s.js({"err":404},404)
     except Exception as e:
@@ -1380,6 +1833,10 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/template/save": c,r=tpl_save(d); s.js(r,c)
       elif p=="/api/template/del": c,r=tpl_del(d); s.js(r,c)
       elif p=="/api/cert": c,r=cert_save(d); s.js(r,c)
+      elif p=="/api/tls/save": c,r=tls_apply(d); s.js(r,c)
+      elif p=="/api/tls/issue": c,r=tls_issue_start(d); s.js(r,c)
+      elif p=="/api/tls/self": c,r=tls_selfsign(); s.js(r,c)
+      elif p=="/api/tls/renew": c,r=tls_renew_start(); s.js(r,c)
       elif p=="/api/plainsub":
         c2=rjson(CFG,{"port":2053,"username":"admin","password":"admin"}); c2["plain_sub"]=bool(d.get("on")); wjson(CFG,c2); s.js({"ok":1,"plain_sub":c2["plain_sub"]})
       elif p=="/api/telegram": c,r=tg_save(d); s.js(r,c)
@@ -1435,13 +1892,14 @@ def cli_tunnel_setup(host,port,user):
 
 if __name__=="__main__":
   if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4]))
+  if len(sys.argv)>=3 and sys.argv[1]=="--cert-renewed": sys.exit(cli_cert_renewed(sys.argv[2]))
   open(DB,"a").close()
   try: migrate_secrets()
   except Exception: pass
   threading.Thread(target=mon,daemon=True).start()
   threading.Thread(target=tg_poll,daemon=True).start()
   c=rjson(CFG,{})
-  srv=Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H); SRV[0]=srv
+  srv=Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H); SRV[0]=srv  # nosec B104 - the panel is meant to be reachable
   try:
     if ensure_cert(): srv.ctx=tls_ctx()
   except Exception: srv.ctx=None                 # no openssl / bad certificate: fall back to plain HTTP
