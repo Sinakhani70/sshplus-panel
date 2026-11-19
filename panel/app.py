@@ -547,7 +547,7 @@ def ts_begin(m):
 def ts_end(ok,d=""):
   st={True:"ok",False:"err","warn":"warn"}[ok]
   with TSL:
-    if TS["steps"]: TS["steps"][-1]["s"]=st; TS["steps"][-1]["d"]=str(d)[:400]
+    if TS["steps"]: TS["steps"][-1]["s"]=st; TS["steps"][-1]["d"]=str(d)[:900]
   if CLI[0]: print(f"      [{st.upper()}] {d}" if d else f"      [{st.upper()}]",flush=True)
 
 def _scrub(t,pw):
@@ -676,7 +676,14 @@ def tunnel_setup_run(host,port,user,pw):
     _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","60","--no-pager","-o","cat"],10)
     txt,h=tun_diag(j); tn=tun_local_check(); virt=cmd(["systemd-detect-virt"])[1]
     extra=("TUN: "+tn+" | " if tn else "")+("virt: "+virt if virt else "")
-    return False,("تانل بالا نیامد: "+txt[-330:]+(("\n"+h) if h else "")+(("\n"+extra) if extra else ""))
+    # the link may be up while nothing passes through it: collect what both ends look like (the key login works at this point)
+    act=cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0
+    if act:
+      pg=cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6); pl=[x for x in (pg[1]+"\n"+pg[2]).splitlines() if x.strip()][-1:]
+      loc=cmd(["ip","-br","addr","show",TUN_DEV])[1] or "no "+TUN_DEV
+      rem=_run(["ssh"]+_ssh_o(port)+[tgt,"ip -br addr show %s 2>&1; ufw status 2>/dev/null | head -1; iptables -S INPUT 2>/dev/null | head -3"%TUN_DEV],t=30)[1]
+      extra+="\nلینک SSH برقرار است ولی داخل تانل ping جواب نمی‌دهد / the SSH link is up but nothing passes: local: %s | ping: %s | exit server: %s"%(loc," ".join(pl),rem.replace("\n"," / ")[:240])
+    return False,("تانل بالا نیامد: "+(h+"\n" if h else "")+(extra+"\n" if extra else "")+txt[-300:])
   def f_exit():
     ip=tun_exit_ip()
     if not ip: return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)"
