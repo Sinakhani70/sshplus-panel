@@ -390,6 +390,31 @@ class TlsExtras(unittest.TestCase):
         self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
 
 
+class TunnelDiag(unittest.TestCase):
+    def test_systemd_chatter_is_dropped_and_the_real_error_is_kept(self):
+        j = """SSHPLUS-TUNNEL: starting ssh -w to root@155.103.69.51:22
+Tunnel device open failed.
+Could not request tunnel forwarding.
+SSHPLUS-TUNNEL: ssh exited before the tunnel device came up (see the ssh message just above)
+sshplus-tunnel.service: Main process exited, code=exited, status=1/FAILURE
+sshplus-tunnel.service: Failed with result 'exit-code'.
+Stopped sshplus-tunnel.service - SSH Plus Tunnel (link to the exit server).
+Started sshplus-tunnel.service - SSH Plus Tunnel (link to the exit server)."""
+        txt, hint = app.tun_diag(j)
+        self.assertIn("Tunnel device open failed.", txt); self.assertIn("Could not request tunnel forwarding.", txt)
+        self.assertNotIn("Started", txt); self.assertNotIn("Failed with result", txt)
+        self.assertTrue(hint)                                                   # a hint for the usual cause
+
+    def test_known_causes_get_a_hint(self):
+        for line, word in (("SSHPLUS-TUNNEL: this server cannot open /dev/net/tun (No such device)", "TUN"),
+                           ("Host key verification failed.", "host key"), ("root@1.2.3.4: Permission denied (publickey).", "key"),
+                           ("ssh: connect to host 1.2.3.4 port 22: Connection timed out", "reach")):
+            h = app.tun_diag(line)[1]; self.assertTrue(h and word.lower() in h.lower(), (line, h))
+
+    def test_only_noise_gives_empty_text(self):
+        self.assertEqual(app.tun_diag("Started sshplus-tunnel.service - x\nsshplus-tunnel.service: Failed with result 'exit-code'.")[0], "")
+
+
 class Translations(unittest.TestCase):
     """the English UI: every Persian key must have a non-empty English value and sane placeholders"""
     def test_dictionary_shape(self):

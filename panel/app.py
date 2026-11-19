@@ -429,6 +429,8 @@ if [ -n "$need" ]; then
   command -v apt-get >/dev/null 2>&1 || { echo "missing:$need (apt-get not found)"; exit 11; }
   apt-get install -y -qq $need >/dev/null 2>&1 || { echo "cannot install:$need"; exit 11; }
 fi
+if [ ! -c /dev/net/tun ]; then modprobe tun 2>/dev/null || true; mkdir -p /dev/net; [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true; chmod 600 /dev/net/tun 2>/dev/null || true; fi
+[ -c /dev/net/tun ] || { echo "the exit server has no /dev/net/tun (OpenVZ/LXC VPS: enable TUN/TAP in its provider panel)"; exit 13; }
 mkdir -p /etc/ssh/sshd_config.d
 echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
 CHK='^permittunnel (yes|point-to-point)'
@@ -574,6 +576,29 @@ def tun_exit_ip():
     if rc==0 and IP_RE.match(o.strip()): return o.strip()
   return ""
 
+def tun_local_check():
+  # can this server open /dev/net/tun? returns "" or the reason
+  try:
+    if not os.path.exists("/dev/net/tun"):
+      cmd(["modprobe","tun"]); os.makedirs("/dev/net",exist_ok=True)
+      if not os.path.exists("/dev/net/tun"):
+        import stat; os.mknod("/dev/net/tun",0o600|stat.S_IFCHR,os.makedev(10,200))
+    os.close(os.open("/dev/net/tun",os.O_RDWR)); return ""
+  except Exception as e: return str(e)
+
+TUN_NOISE=re.compile(r"^(Started|Stopped|Starting|Stopping)\b|\.service: |Main process exited|Failed with result|Scheduled restart|Consumed .*CPU|Deactivated successfully|systemd\[")
+def tun_diag(j):
+  # the unit's own messages (ssh errors, SSHPLUS-TUNNEL lines) without systemd's start/stop chatter, plus a hint for the usual causes
+  lines=[l.strip() for l in j.splitlines() if l.strip() and not TUN_NOISE.search(l)]
+  txt="\n".join(lines[-6:])
+  hints=[(r"cannot open /dev/net/tun|Tunnel device open failed|/dev/net/tun|TUN/TAP","سرور TUN ندارد (روی OpenVZ/LXC در پنل VPS گزینه‌ی TUN/TAP را روشن کن) / the server has no TUN device"),
+         (r"Could not request tunnel forwarding|tun: Operation not permitted|channel \d+: open failed","سرور مقصد تانل را نمی‌پذیرد (PermitTunnel یا TUN در سرور مقصد) / the exit server refused the tunnel (PermitTunnel or TUN there)"),
+         (r"Host key verification failed|REMOTE HOST IDENTIFICATION","کلید هاست سرور مقصد عوض شده؛ تانل را حذف و دوباره نصب کن / the exit server's host key changed"),
+         (r"Permission denied \(publickey","کلید تانل روی سرور مقصد پذیرفته نشد؛ دوباره نصب کن / the exit server did not accept the tunnel key"),
+         (r"Connection (timed out|refused)|No route to host|Network is unreachable","به سرور مقصد نمی‌رسد (فایروال/پورت SSH؟) / cannot reach the exit server (firewall / SSH port?)")]
+  h=next((m for p,m in hints if re.search(p,txt,re.I)),"")
+  return txt,h
+
 def tunnel_rollback():
   cmd(["systemctl","disable","--now","sshplus-tunnel"])
   for f in (TCONF,TKH):
@@ -632,6 +657,8 @@ def tunnel_setup_run(host,port,user,pw):
     if fixed: return True,"تداخل پورت روی این سرور رفع شد: "+", ".join("%d←%d"%(c["from"],c["to"]) for c in fixed)
     return True,"PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد"
   def f_local():
+    tn=tun_local_check()
+    if tn: return False,"این سرور نمی‌تواند /dev/net/tun را باز کند: %s (روی OpenVZ/LXC در پنل VPS گزینه‌ی TUN/TAP را روشن کن)"%tn
     tconf_write({"TUN_HOST":host,"TUN_PORT":port,"TUN_USER":user,"TUN_DEV":TUN_DEV,"TUN_ID":TUN_ID,
                  "TUN_LOCAL":TUN_LOCAL,"TUN_REMOTE":TUN_REMOTE,"SINCE":int(time.time()),"ROUTE":old_route,
                  "REV_PORTS":",".join(map(str,sorted(ctx.get("okm",{})))),
@@ -646,8 +673,10 @@ def tunnel_setup_run(host,port,user,pw):
          cmd(["ping","-c","1","-W","2","-I",TUN_DEV,TUN_REMOTE],6)[0]==0:
         return True,f"{TUN_LOCAL} <-> {TUN_REMOTE}"
       time.sleep(1)
-    _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","4","--no-pager","-o","cat"],10)
-    return False,"تانل بالا نیامد: "+j[-250:]
+    _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","60","--no-pager","-o","cat"],10)
+    txt,h=tun_diag(j); tn=tun_local_check(); virt=cmd(["systemd-detect-virt"])[1]
+    extra=("TUN: "+tn+" | " if tn else "")+("virt: "+virt if virt else "")
+    return False,("تانل بالا نیامد: "+txt[-330:]+(("\n"+h) if h else "")+(("\n"+extra) if extra else ""))
   def f_exit():
     ip=tun_exit_ip()
     if not ip: return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)"
@@ -1771,7 +1800,7 @@ class H(BaseHTTPRequestHandler):
       p=urlparse(s.path).path
       if p in ("/","/index.html"):
         b=open(HTML,"rb").read()
-        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8")
+        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
