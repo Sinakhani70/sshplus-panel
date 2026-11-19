@@ -30,6 +30,7 @@ One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear +
 - **TLS & Domain tab**: one switch turns on SSH inside TLS (stunnel in front of two local Dropbear instances). Ports: normal accounts (default 443) and tunnel accounts (default 8843).
 - **Per account connection type** (create, edit, bulk, templates): *Normal + TLS*, *Normal only*, *TLS only*. A TLS-only account is refused on the plain Dropbear ports and on OpenSSH (port 22 ...); a normal-only account is refused on the TLS ports. Entry via the second server works with TLS as well (the TLS ports are forwarded).
 - **Domain and certificate in one click**: your own domain, or a free one chosen by the admin — `sslip.io`, `nip.io` (no sign-up), `DuckDNS` (free account + token) or any other wildcard-DNS suffix. The panel checks that the name points to this server, installs certbot, gets a Let's Encrypt certificate (HTTP-01 on port 80) and renews it automatically. Without a domain a self-signed certificate is used (apps must allow an untrusted certificate).
+- Hardening and visibility: per-IP connection limit on the TLS ports, real client addresses in the *Online* column, a *TLS details* button for apps without an import link, a Let's Encrypt *staging* switch. See [docs/REAL-WORLD-CHECKLIST.md](docs/REAL-WORLD-CHECKLIST.md) for the five steps to verify on a real server.
 - The same certificate and domain also serve the panel's own HTTPS (one place to manage them). Subscription links and the subscription page list the TLS ports and SNI.
 
 **Tunnel (two servers)**
@@ -186,10 +187,11 @@ Remove the tunnel in the panel first (it also takes the forwarded ports back fro
 ```bash
 systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
+/usr/local/bin/sshplus-tls-fw clean
 rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-dropbear-s.service /etc/systemd/system/sshplus-dropbear-ts.service /etc/systemd/system/sshplus-stunnel.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
-rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-{t,n,tn,s,ts} /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-{t,n,tn,s,ts} /usr/local/bin/sshplus-tls-fw /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
 ```
 
 Accounts stay on the system; remove them with `userdel USERNAME`. Make sure you still have another way into the server (for example port 22) before deleting `/etc/ssh/sshd_config.d/00-sshplus.conf`.
@@ -247,6 +249,7 @@ Use this software only on servers you own or administer, and in accordance with 
 - **تب «TLS و دامنه»**: با یک کلید SSH داخل TLS قرار می‌گیرد (stunnel جلوی دو Dropbear محلی). پورت اکانت‌های معمولی (پیش‌فرض ۴۴۳) و اکانت‌های تانل (پیش‌فرض ۸۸۴۳) جداست.
 - **نوع اتصال هر اکانت** (ساخت، ویرایش، دسته‌ای، قالب): *معمولی + TLS*، *فقط معمولی*، *فقط TLS*. این محدودیت روی هر نمونه‌ی Dropbear اعمال می‌شود؛ اکانت «فقط TLS» روی پورت‌های Dropbear معمولی و اکانت «فقط معمولی» روی پورت‌های TLS وارد نمی‌شود. اکانت «فقط TLS» روی OpenSSH (پورت ۲۲ و ...) هم وارد نمی‌شود. ورود از سرور ۲ هم با TLS کار می‌کند (پورت‌های TLS فوروارد می‌شوند).
 - **دامنه و گواهی با یک کلیک**: دامنه‌ی خودت، یا یک دامنه‌ی رایگان به انتخاب ادمین — `sslip.io` و `nip.io` (بدون ثبت‌نام)، `DuckDNS` (حساب رایگان + توکن) یا هر پسوند wildcard-DNS دیگر. پنل بررسی می‌کند نام به این سرور اشاره کند، certbot را نصب می‌کند، گواهی Let's Encrypt (تأیید HTTP روی پورت ۸۰) می‌گیرد و خودکار تمدید می‌کند. بدون دامنه گواهی self-signed استفاده می‌شود (برنامه باید گواهی نامعتبر را بپذیرد).
+- سخت‌سازی و دید بهتر: محدودیت اتصال به ازای هر IP روی پورت‌های TLS، نمایش IP واقعی کلاینت در ستون «آنلاین»، دکمه‌ی «مشخصات TLS» برای برنامه‌های بدون لینک import و سوییچ staging برای Let's Encrypt. پنج مرحله‌ی آزمون روی سرور واقعی در [docs/REAL-WORLD-CHECKLIST.md](docs/REAL-WORLD-CHECKLIST.md).
 - همین گواهی و دامنه برای HTTPS خودِ پنل هم استفاده می‌شود (یک جا برای مدیریت). لینک اشتراک و صفحه‌ی اشتراک پورت‌های TLS و SNI را نشان می‌دهند.
 
 **تانل (دو سرور)**
@@ -403,10 +406,11 @@ sysctl net.ipv4.tcp_congestion_control
 ```bash
 systemctl disable --now sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel sshplus-tunnel sshplus-tunnel-net badvpn badvpn-t
 /usr/local/bin/sshplus-tunnel-net clean
+/usr/local/bin/sshplus-tls-fw clean
 rm -f /etc/systemd/system/sshplus-panel.service /etc/systemd/system/sshplus-dropbear.service /etc/systemd/system/sshplus-dropbear-t.service /etc/systemd/system/sshplus-dropbear-s.service /etc/systemd/system/sshplus-dropbear-ts.service /etc/systemd/system/sshplus-stunnel.service /etc/systemd/system/sshplus-tunnel.service /etc/systemd/system/sshplus-tunnel-net.service /etc/systemd/system/badvpn.service /etc/systemd/system/badvpn-t.service
 systemctl daemon-reload
 rm -rf /opt/sshplus-panel /etc/SSHPlus
-rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-{t,n,tn,s,ts} /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
+rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local/bin/sshplus-shell /usr/local/bin/sshplus-shell-{t,n,tn,s,ts} /usr/local/bin/sshplus-tls-fw /usr/local/bin/sshplus-pass /usr/local/bin/sshplus-tunnel-net /usr/local/bin/start-tunnel.sh /usr/local/bin/sshplus-tunnel-setup /usr/local/bin/badvpn-udpgw
 ```
 
 اکانت‌ها روی سیستم می‌مانند؛ با `userdel USERNAME` پاکشان کن. قبل از حذف `/etc/ssh/sshd_config.d/00-sshplus.conf` مطمئن شو راه دیگری برای ورود به سرور داری (مثلاً پورت ۲۲).

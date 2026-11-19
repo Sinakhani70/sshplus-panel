@@ -330,6 +330,66 @@ class FreeDomains(unittest.TestCase):
             app.dns_ips = old
 
 
+class TlsExtras(unittest.TestCase):
+    def setUp(self):
+        self.t = tempfile.mkdtemp()
+        self.old = {k: getattr(app, k) for k in ("TLSC", "STUNLOG", "PORTS", "CFG", "cmd", "have", "ufw_open", "ensure_cert", "tls_shell_files", "listen_ports", "sshd_ports", "STUN_CONF", "TLSFW")}
+        app.TLSC = self.t + "/tls.json"; app.STUNLOG = self.t + "/stunnel.log"; app.PORTS = self.t + "/ports.json"; app.CFG = self.t + "/panel.json"; app.STUN_CONF = self.t + "/st.conf"; app.TLSFW = self.t + "/nofw"
+        with open(app.PORTS, "w") as f: json.dump({"ssh": 22, "ssh2": 2222, "db": [442], "tdb": [2087]}, f)
+        app.cmd = lambda *a, **k: (0, "", ""); app.have = lambda n: True; app.ufw_open = lambda p: "none"; app.ensure_cert = lambda: True
+        app.tls_shell_files = lambda: None; app.listen_ports = lambda: {}; app.sshd_ports = lambda: {22}
+
+    def tearDown(self):
+        for k, v in self.old.items(): setattr(app, k, v)
+        app._CIP["t"] = 0.0
+
+    def test_per_ip_limit_is_validated_and_stored(self):
+        self.assertEqual(app.tls_cfg()["perip"], 100)
+        self.assertEqual(app.tls_apply({"on": False, "perip": 0})[0], 200); self.assertEqual(app.tls_cfg()["perip"], 0)
+        self.assertEqual(app.tls_apply({"on": False, "perip": "25"})[0], 200); self.assertEqual(app.tls_cfg()["perip"], 25)
+        for bad in ("abc", -1, 10001, "1.5"): self.assertEqual(app.tls_apply({"on": False, "perip": bad})[0], 400, bad)
+        self.assertEqual(app.tls_cfg()["perip"], 25)                                    # refused values change nothing
+
+    def test_limit_change_does_not_restart_the_front(self):
+        calls = []
+        app.listen_ports = lambda: {p: {"stunnel" if p in (443, 8843) else "dropbear"} for p in list(range(40000, 40300)) + [443, 8843]}   # our own programs are listening
+        app.cmd = lambda c, *a, **k: (calls.append(list(c)) or (0, "active", ""))
+        app.tls_apply({"on": True, "ports": [443], "tports": [8843]})
+        self.assertTrue(any(c[:2] == ["systemctl", "restart"] for c in calls))          # switching on starts it
+        calls.clear()
+        app.tls_apply({"perip": 7})
+        self.assertFalse(any(c[:2] == ["systemctl", "restart"] for c in calls), calls)   # sessions keep running
+
+    def test_client_addresses_come_from_the_stunnel_log(self):
+        with open(app.STUNLOG, "w") as f:
+            f.write("""2026.11.19 09:47:23 LOG5[3]: Service [tls-d-443] accepted connection from 203.0.113.7:51000
+2026.11.19 09:47:23 LOG5[4]: Service [tls-d-443] accepted connection from 2001:db8::5:52000
+2026.11.19 09:47:23 LOG5[3]: s_connect: connected 127.0.0.1:40102
+2026.11.19 09:47:23 LOG5[3]: Service [tls-d-443] connected remote server from 127.0.0.1:44346
+2026.11.19 09:47:24 LOG5[4]: Service [tls-d-443] connected remote server from 127.0.0.1:44350
+2026.11.19 09:47:25 LOG5[9]: Service [tls-d-443] connected remote server from 127.0.0.1:44360
+""")
+        self.assertEqual(app.tls_client_ips(), {44346: "203.0.113.7", 44350: "2001:db8::5"})   # [9] has no matching accept line: ignored
+
+    def test_missing_or_garbled_log_is_harmless(self):
+        self.assertEqual(app.tls_client_ips(), {}); app._CIP["t"] = 0.0
+        with open(app.STUNLOG, "wb") as f: f.write(b"\xff\xfe not a log \x00")
+        self.assertEqual(app.tls_client_ips(), {})
+
+    def test_log_is_trimmed_when_big(self):
+        with open(app.STUNLOG, "wb") as f: f.truncate(9 * 1048576)
+        app.stunnel_log_trim(); self.assertEqual(os.path.getsize(app.STUNLOG), 0)
+
+    def test_manual_details_for_apps(self):
+        x = {"u": "u1", "pw": "pw", "tls": {"host": "vpn.example.com", "ports": [443, 2096], "sni": "vpn.example.com", "insecure": False}}
+        t = app.tls_manual_text(x)
+        self.assertIn("TLS port(s): 443, 2096", t); self.assertIn("SNI: vpn.example.com", t); self.assertIn("Allow untrusted certificate: no", t)
+        self.assertIn('ProxyCommand="openssl s_client -quiet -connect vpn.example.com:443 -servername vpn.example.com"', t)
+        x["tls"].update({"sni": "", "insecure": True, "host": "1.2.3.4"})
+        t = app.tls_manual_text(x); self.assertIn("yes (self-signed)", t); self.assertNotIn("-servername", t)
+        self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
+
+
 class Translations(unittest.TestCase):
     """the English UI: every Persian key must have a non-empty English value and sane placeholders"""
     def test_dictionary_shape(self):

@@ -234,6 +234,11 @@ cat > /etc/systemd/system/sshplus-dropbear-t.service <<'EOF'
 @@INCLUDE systemd/sshplus-dropbear-t.service@@
 EOF
 
+cat > /usr/local/bin/sshplus-tls-fw <<'EOF'
+@@INCLUDE scripts/sshplus-tls-fw@@
+EOF
+chmod 755 /usr/local/bin/sshplus-tls-fw
+
 cat > /etc/systemd/system/sshplus-dropbear-s.service <<'EOF'
 @@INCLUDE systemd/sshplus-dropbear-s.service@@
 EOF

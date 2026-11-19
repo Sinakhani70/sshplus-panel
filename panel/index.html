@@ -53,6 +53,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <button class="btn btn-s" onclick="copyText(subUrl+'?fmt=plain')">📋 متن ساده</button>
     <button class="btn btn-s btn-o" onclick="copyText(subSsh[0]||'')">📋 لینک SSH</button>
     <button class="btn btn-s btn-o" onclick="copyText(subSshB[0]||'')">📋 لینک SSH (base64)</button>
+    <button class="btn btn-s btn-o hid" id="subTlsBtn" onclick="copyText(subTls)">📋 مشخصات TLS (ورود دستی)</button>
     <button class="btn btn-s btn-w" onclick="window.open(subUrl+'?fmt=html')">🔗 باز کردن صفحه</button>
     <button class="btn btn-s btn-e" onclick="$('subBox').classList.add('hid')">بستن</button>
   </div>
@@ -220,6 +221,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
         <div><label>پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)</label><input id="tlsP1" dir="ltr" placeholder="443"></div>
         <div><label>پورت(های) TLS اکانت‌های تانل</label><input id="tlsP2" dir="ltr" placeholder="8843"></div>
       </div>
+      <div class="row"><div><label>حداکثر اتصال هم‌زمان از هر IP روی پورت‌های TLS (۰ = بدون محدودیت)</label><input id="tlsPerIp" type="number" min="0" max="10000" dir="ltr" placeholder="100"></div></div>
       <button class="btn btn-s" onclick="tlsPorts()">💾 ذخیره‌ی پورت‌ها</button>
       <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• روی پورت‌های OpenSSH (مثل 22) هم اکانت «فقط TLS» وارد نمی‌شود؛ اکانت‌های «معمولی» و «هر دو» وارد می‌شوند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
     </div>
@@ -250,6 +252,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     </div>
     <div id="tlsOwnB" class="hid"><label>دامنه‌ی شما</label><input id="tlsDom" dir="ltr" autocapitalize="none" placeholder="vpn.example.com"></div>
     <div id="tlsProvNote" style="font-size:.78rem;color:var(--mu);line-height:1.9;margin:.1rem 0 .8rem"></div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin:.2rem 0 .7rem"><input type="checkbox" id="tlsStaging" style="width:auto;margin:.2rem 0 0" onchange="tlsStagingSave()"><span>حالت آزمایشی Let's Encrypt (staging): برای امتحان کردن مراحل بدون مصرف سقف؛ گواهی آن معتبر نیست</span></label>
     <button class="btn" id="tlsGo" onclick="tlsGo()">⚡ دریافت دامنه و گواهی</button>
     <div id="tlsLog" style="margin-top:.8rem;font-size:.85rem;line-height:1.9"></div>
   </div>

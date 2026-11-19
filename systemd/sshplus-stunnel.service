@@ -5,6 +5,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=/usr/bin/stunnel /etc/SSHPlus/stunnel.conf
+ExecStartPost=/usr/local/bin/sshplus-tls-fw apply
+ExecStopPost=/usr/local/bin/sshplus-tls-fw clean
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
