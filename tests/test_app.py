@@ -257,20 +257,23 @@ class TlsConfig(unittest.TestCase):
     def test_stunnel_config(self):
         app.stunnel_write(app.tls_cfg())
         with open(app.STUN_CONF) as f: t = f.read()
-        self.assertIn("[tls-d-443]\naccept = 0.0.0.0:443\nconnect = 127.0.0.1:40022", t)
-        self.assertIn("[tls-t-8843]\naccept = 0.0.0.0:8843\nconnect = 127.0.0.1:40023", t)
+        n = app.TLS_BACKENDS
+        d = "".join("connect = 127.0.0.1:%d\n" % (40100 + i) for i in range(n)); tt = "".join("connect = 127.0.0.1:%d\n" % (40120 + i) for i in range(n))
+        self.assertIn("[tls-d-443]\naccept = 0.0.0.0:443\n" + d + "failover = rr", t)        # round-robin over several Dropbear processes
+        self.assertIn("[tls-t-8843]\naccept = 0.0.0.0:8843\n" + tt + "failover = rr", t)
         self.assertIn("cert = " + app.CERT, t); self.assertIn("sslVersionMin = TLSv1.2", t)
         self.assertEqual(oct(os.stat(app.STUN_CONF).st_mode & 0o777), "0o600")
 
     def test_backend_ports_move_if_something_else_listens(self):
-        app.listen_ports = lambda: {40022: {"python3"}}
+        app.listen_ports = lambda: {40103: {"python3"}}                           # inside the first block
         bd, bt = app.tls_backends(app.tls_cfg())
-        self.assertNotEqual(bd, 40022); self.assertNotEqual(bd, bt)
-        app.listen_ports = lambda: {40022: {"dropbear"}}                          # our own instance: keep
-        self.assertEqual(app.tls_backends(app.tls_cfg())[0], 40022)
+        self.assertNotEqual(bd, 40100)
+        self.assertTrue(set(range(bd, bd + app.TLS_BACKENDS)).isdisjoint(range(bt, bt + app.TLS_BACKENDS)))
+        app.listen_ports = lambda: {40103: {"dropbear"}}                          # our own instance: keep
+        self.assertEqual(app.tls_backends(app.tls_cfg()), (40100, 40120))
 
     def test_other_features_keep_away_from_tls_ports(self):
-        self.assertEqual(app.tls_taken(), {443, 8843, 40022, 40023})
+        self.assertEqual(app.tls_taken(), {443, 8843} | set(range(40100, 40106)) | set(range(40120, 40126)))
 
 
 class FreeDomains(unittest.TestCase):

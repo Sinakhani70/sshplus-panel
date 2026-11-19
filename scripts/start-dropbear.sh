@@ -1,7 +1,9 @@
 #!/bin/bash
 # usage: start-dropbear.sh direct|tunnel|tlsd|tlst
 #   direct / tunnel : public ports from ports.json ("db" / "tdb")
-#   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt")
+#   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt").
+#                     TLS_BACKENDS (6) Dropbear processes on consecutive ports: Dropbear refuses more than 5 unauthenticated
+#                     connections per source IP and every TLS client reaches it from 127.0.0.1, so stunnel spreads them round-robin.
 MODE="${1:-direct}"
 mkdir -p /etc/dropbear
 for t in rsa ecdsa ed25519; do
@@ -12,10 +14,10 @@ P=$(python3 - "$MODE" <<'PY'
 import json,sys
 mode=sys.argv[1]
 if mode in ("tlsd","tlst"):
-    key,dflt="bd" if mode=="tlsd" else "bt",40022 if mode=="tlsd" else 40023
+    key,dflt="bd" if mode=="tlsd" else "bt",40100 if mode=="tlsd" else 40120
     try: v=int(json.load(open("/etc/SSHPlus/tls.json")).get(key,dflt))
     except Exception: v=dflt
-    print("-p 127.0.0.1:%d"%(v if 0<v<65536 else dflt))
+    print(v if 0<v<65500 else dflt)
     sys.exit(0)
 key="tdb" if mode=="tunnel" else "db"
 dflt="-p 2087" if mode=="tunnel" else "-p 442 -p 444"
@@ -30,7 +32,16 @@ except Exception:
     print(dflt)
 PY
 )
-exec /usr/sbin/dropbear -F -E -w -K 30 \
-  -r /etc/dropbear/dropbear_rsa_host_key \
-  -r /etc/dropbear/dropbear_ecdsa_host_key \
-  -r /etc/dropbear/dropbear_ed25519_host_key $P
+DB=(/usr/sbin/dropbear -F -E -w -K 30
+  -r /etc/dropbear/dropbear_rsa_host_key
+  -r /etc/dropbear/dropbear_ecdsa_host_key
+  -r /etc/dropbear/dropbear_ed25519_host_key)
+case "$MODE" in
+  tlsd|tlst)
+    TLS_BACKENDS=6
+    for i in $(seq 0 $((TLS_BACKENDS-1))); do "${DB[@]}" -p 127.0.0.1:$((P+i)) & done
+    trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
+    wait -n                                   # one of them died: stop the rest, systemd restarts the unit
+    kill $(jobs -p) 2>/dev/null; exit 1 ;;
+  *) exec "${DB[@]}" $P ;;
+esac

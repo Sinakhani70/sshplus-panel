@@ -221,12 +221,15 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
         <div><label>پورت(های) TLS اکانت‌های تانل</label><input id="tlsP2" dir="ltr" placeholder="8843"></div>
       </div>
       <button class="btn btn-s" onclick="tlsPorts()">💾 ذخیره‌ی پورت‌ها</button>
-      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• پورت‌های OpenSSH (مثل 22) به نوع اتصال وابسته نیستند و همه‌ی اکانت‌های پنل روی آن‌ها کار می‌کنند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• روی پورت‌های OpenSSH (مثل 22) هم اکانت «فقط TLS» وارد نمی‌شود؛ اکانت‌های «معمولی» و «هر دو» وارد می‌شوند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
     </div>
     <div class="card">
       <h3 style="margin-bottom:.7rem;color:var(--pr)">📜 گواهی فعلی</h3>
       <div id="tlsCert" style="font-size:.85rem;line-height:1.9;margin-bottom:.6rem"></div>
-      <button class="btn btn-s btn-w" onclick="tlsSelf()">↩️ بازگشت به گواهی self-signed</button>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+        <button class="btn btn-s btn-o" id="tlsRenewBtn" onclick="tlsRenew()">🔄 تمدید گواهی</button>
+        <button class="btn btn-s btn-w" onclick="tlsSelf()">↩️ بازگشت به گواهی self-signed</button>
+      </div>
       <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsShared">همین گواهی و دامنه برای HTTPS خودِ پنل هم استفاده می‌شود؛ جای دیگری چیزی لازم نیست تنظیم شود.</div>
     </div>
   </div>

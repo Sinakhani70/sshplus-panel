@@ -208,7 +208,9 @@ cat > /usr/local/bin/start-dropbear.sh <<'EOF'
 #!/bin/bash
 # usage: start-dropbear.sh direct|tunnel|tlsd|tlst
 #   direct / tunnel : public ports from ports.json ("db" / "tdb")
-#   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt")
+#   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt").
+#                     TLS_BACKENDS (6) Dropbear processes on consecutive ports: Dropbear refuses more than 5 unauthenticated
+#                     connections per source IP and every TLS client reaches it from 127.0.0.1, so stunnel spreads them round-robin.
 MODE="${1:-direct}"
 mkdir -p /etc/dropbear
 for t in rsa ecdsa ed25519; do
@@ -219,10 +221,10 @@ P=$(python3 - "$MODE" <<'PY'
 import json,sys
 mode=sys.argv[1]
 if mode in ("tlsd","tlst"):
-    key,dflt="bd" if mode=="tlsd" else "bt",40022 if mode=="tlsd" else 40023
+    key,dflt="bd" if mode=="tlsd" else "bt",40100 if mode=="tlsd" else 40120
     try: v=int(json.load(open("/etc/SSHPlus/tls.json")).get(key,dflt))
     except Exception: v=dflt
-    print("-p 127.0.0.1:%d"%(v if 0<v<65536 else dflt))
+    print(v if 0<v<65500 else dflt)
     sys.exit(0)
 key="tdb" if mode=="tunnel" else "db"
 dflt="-p 2087" if mode=="tunnel" else "-p 442 -p 444"
@@ -237,10 +239,19 @@ except Exception:
     print(dflt)
 PY
 )
-exec /usr/sbin/dropbear -F -E -w -K 30 \
-  -r /etc/dropbear/dropbear_rsa_host_key \
-  -r /etc/dropbear/dropbear_ecdsa_host_key \
-  -r /etc/dropbear/dropbear_ed25519_host_key $P
+DB=(/usr/sbin/dropbear -F -E -w -K 30
+  -r /etc/dropbear/dropbear_rsa_host_key
+  -r /etc/dropbear/dropbear_ecdsa_host_key
+  -r /etc/dropbear/dropbear_ed25519_host_key)
+case "$MODE" in
+  tlsd|tlst)
+    TLS_BACKENDS=6
+    for i in $(seq 0 $((TLS_BACKENDS-1))); do "${DB[@]}" -p 127.0.0.1:$((P+i)) & done
+    trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
+    wait -n                                   # one of them died: stop the rest, systemd restarts the unit
+    kill $(jobs -p) 2>/dev/null; exit 1 ;;
+  *) exec "${DB[@]}" $P ;;
+esac
 EOF
 chmod 755 /usr/local/bin/start-dropbear.sh
 
@@ -627,8 +638,10 @@ NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
 SHELLS={("direct","both"):SHELL,("tunnel","both"):SHELL_T,("direct","normal"):SHELL+"-n",("tunnel","normal"):SHELL+"-tn",
         ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts"}
 SHELL_OF={v:k for k,v in SHELLS.items()}
+TLS_BACKENDS=6                                   # Dropbear processes per TLS instance (keep in line with scripts/start-dropbear.sh)
 def shell_for(tm,cx): return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
 def is_tun(sh): return SHELL_OF.get(sh,("direct",""))[0]=="tunnel"
+SSHDENY="/etc/ssh/sshd_config.d/02-sshplus-deny.conf"
 
 def cmd(c,t=15):
   try:
@@ -739,7 +752,7 @@ def _on_map():
   um=user_uid_map()
   sessions={u:[] for u in um}; io_pids={u:set() for u in um}
   _,o,_=cmd(["ps","-eo","pid,ppid,user:32,comm,args","--no-headers"])
-  rows=[]; masters=set()
+  rows=[]; masters=set(); launchers=set()
   for l in o.splitlines():
     p=l.split(None,4)
     if len(p)<4 or not p[0].isdigit() or not p[1].isdigit(): continue
@@ -747,7 +760,9 @@ def _on_map():
     args=p[4] if len(p)>4 else ""
     rows.append((pid,ppid,usr,comm,args))
     if ppid==1 and comm in ("sshd","dropbear"): masters.add(pid)
+    if comm.startswith("start-dropbear"): launchers.add(pid)                 # TLS back ends: several Dropbear masters under one launcher script
 
+  masters|={pid for pid,ppid,_,comm,_ in rows if comm=="dropbear" and ppid in launchers}
   for pid,ppid,usr,comm,args in rows:
     if usr in um:
       io_pids[usr].add(pid)
@@ -889,7 +904,6 @@ def user_save(d):
     if tconf().get("ROUTE","both")=="forward":                       # old v1.2.0 install: switch forwarding on
       c2,r2=tunnel_route_apply("both")
       if c2!=200: return 400,{"ok":0,"msg":"Could not enable entry via the second server: "+str(r2.get("msg",""))}
-  if en=="B" and cx=="tls": return 400,{"ok":0,"msg":"Entry via the second server does not support TLS-only accounts (the TLS ports are not forwarded). Choose Normal or Both."}
   ea=["-e",(datetime.utcnow()+timedelta(days=days)).strftime("%Y-%m-%d")] if days>0 else []
   if edit: rc,_,er=cmd(["usermod","-s",shl]+ea+[u])
   else: rc,_,er=cmd(["useradd","-M","-s",shl]+ea+[u])
@@ -911,7 +925,7 @@ def user_save(d):
     if not m.get("tok"): m["tok"]=secrets.token_hex(12)
     if d.get("rst"): m["u"]=0
     wjson(META,meta)
-  refresh_lock(u)
+  refresh_lock(u); sshd_deny_sync()
   return 200,({"ok":1,"warn":"tls_off"} if cx!="normal" and not tls_cfg()["on"] else {"ok":1})
 
 def user_del(d):
@@ -924,7 +938,28 @@ def user_del(d):
     ls=read_limits_db(); ls.pop(u,None); write_limits_db(ls)
     meta=rjson(META,{}); meta.pop(u,None); wjson(META,meta)
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   return 200,{"ok":1}
+
+def sshd_deny_sync():
+  # TLS-only accounts must not log in on the OpenSSH ports either (OpenSSH does not look at the per-instance /etc/shells)
+  names=sorted(u for u,(_,sh) in passwd_map().items() if SHELL_OF.get(sh,("","both"))[1]=="tls")
+  want=("# generated by the CK.VPN panel: TLS-only accounts\nDenyUsers "+" ".join(names)+"\n") if names else ""
+  try:
+    with open(SSHDENY) as f: cur=f.read()
+  except Exception: cur=""
+  if cur==want: return
+  try:
+    if want:
+      with open(SSHDENY,"w") as f: f.write(want)
+    elif os.path.exists(SSHDENY): os.remove(SSHDENY)
+    if cmd(["sshd","-t"])[0]!=0:                                   # never leave a broken sshd config behind
+      if cur:
+        with open(SSHDENY,"w") as f: f.write(cur)
+      elif os.path.exists(SSHDENY): os.remove(SSHDENY)
+      return
+    if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
+  except Exception: pass
 
 # ---------- ports & BadVPN ----------
 def apply_ports(d):
@@ -1247,7 +1282,8 @@ def tunnel_setup_run(host,port,user,pw):
 def rev_ports():
   # panel-server ports that can be reached through the exit server's IP: Dropbear ports (direct + tunnel) + 2nd OpenSSH port
   pc=rjson(PORTS,{}); out=[]
-  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]:
+  tl=tls_cfg(); extra=(tl["ports"]+tl["tports"]) if tl["on"] else []              # SSH over TLS: the public TLS ports too
+  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]+extra:
     v=to_port(x)
     if v and v!=22 and v not in out: out.append(v)
   return out
@@ -1334,7 +1370,7 @@ def ports_sync():
   # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
   rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
   pc=rjson(PORTS,{})
-  rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports())
+  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
   if tconf().get("TUN_HOST"):
     c,r=tunnel_route_apply("both")
     if r.get("ok"): rep["map"]=r["map"]; rep["skipped"]=r["skipped"]; rep["fw_b"]=r.get("fw_b","none")
@@ -1384,6 +1420,7 @@ def tunnel_remove():
       for pid in io.get(u,[]): kill_pid(pid)
   tunnel_rollback()
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   with TSL: TS["steps"]=[]; TS["ok"]=None
   return 200,{"ok":1,"converted":n}
 
@@ -1400,7 +1437,8 @@ def mon():
           if cmd(["systemctl","is-active",srv])[0]!=0:
             cmd(["systemctl","reset-failed",srv]); cmd(["systemctl","restart",srv])
       n+=1
-      if n==4: threading.Thread(target=ports_sync,daemon=True).start()     # once per panel start / update
+      if n==4:                                                             # once per panel start / update
+        threading.Thread(target=ports_sync,daemon=True).start(); sshd_deny_sync()
       if n%20==0:                                                          # every minute: history + Telegram alerts
         try: alerts_tick(hist_tick())
         except Exception: pass
@@ -1548,18 +1586,21 @@ def tls_cfg():
       if v and v not in out: out.append(v)
     return out[:3]
   md=d.get("mode") if d.get("mode") in ("self","own","free") else "self"
-  return {"on":bool(d.get("on")),"ports":pl("ports",[443]),"tports":pl("tports",[8843]),"bd":to_port(d.get("bd")) or 40022,"bt":to_port(d.get("bt")) or 40023,
+  return {"on":bool(d.get("on")),"ports":pl("ports",[443]),"tports":pl("tports",[8843]),"bd":to_port(d.get("bd")) or 40100,"bt":to_port(d.get("bt")) or 40120,
           "mode":md,"domain":str(d.get("domain","")),"prov":str(d.get("prov","")),"suffix":str(d.get("suffix","")),"duckname":str(d.get("duckname","")),
           "duck":bool(d.get("duck")),"email":str(d.get("email",""))}
 
+def tls_back_ports(c):
+  return set(range(c["bd"],c["bd"]+TLS_BACKENDS))|set(range(c["bt"],c["bt"]+TLS_BACKENDS))
+
 def tls_taken(c=None):
   # ports this feature owns (public TLS ports + the local Dropbear back ends): other settings must not use them
-  c=c or tls_cfg(); return set(c["ports"])|set(c["tports"])|{c["bd"],c["bt"]}
+  c=c or tls_cfg(); return set(c["ports"])|set(c["tports"])|tls_back_ports(c)
 
 def tls_reserved(c=None):
   c=c or tls_cfg(); pc=rjson(PORTS,{})
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2")),c["bd"],c["bt"]}|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|sshd_ports()
+  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|sshd_ports()
 
 def cert_meta():
   rc,o,_=cmd(["openssl","x509","-in",CERT,"-noout","-subject","-issuer","-enddate"])
@@ -1610,18 +1651,20 @@ def stunnel_write(c):
   L=["; generated by the CK.VPN panel - changes are overwritten","foreground = yes","pid =","debug = 3","sslVersionMin = TLSv1.2",
      "socket = l:TCP_NODELAY=1","socket = r:TCP_NODELAY=1"]
   for kind,ports,bp in (("d",c["ports"],c["bd"]),("t",c["tports"],c["bt"])):
-    for p in ports: L+=["","[tls-%s-%d]"%(kind,p),"accept = 0.0.0.0:%d"%p,"connect = 127.0.0.1:%d"%bp,"cert = "+CERT,"key = "+CKEY]
+    for p in ports:
+      L+=["","[tls-%s-%d]"%(kind,p),"accept = 0.0.0.0:%d"%p]+["connect = 127.0.0.1:%d"%(bp+i) for i in range(TLS_BACKENDS)]+["failover = rr","TIMEOUTbusy = 30","cert = "+CERT,"key = "+CKEY]
   t=STUN_CONF+".t"
   with open(t,"w") as f: f.write("\n".join(L)+"\n")
   os.chmod(t,0o600); os.replace(t,STUN_CONF)
 
 def tls_backends(c):
-  # local Dropbear back-end ports: keep the current ones unless something else listens there
-  lis=listen_ports(); res=tls_reserved(c)-{c["bd"],c["bt"]}
-  def free(p,own): return p not in res and (p not in lis or lis[p]<={"dropbear"})
-  bd,bt=c["bd"],c["bt"]
-  if not free(bd,bd): bd=next((p for p in range(40022,40200) if free(p,p) and p!=bt),bd)
-  if not free(bt,bt) or bt==bd: bt=next((p for p in range(40023,40200) if free(p,p) and p!=bd),bt)
+  # first ports of the two blocks of local Dropbear back ends: keep the current ones unless something else listens there
+  lis=listen_ports(); res=tls_reserved(c)-tls_back_ports(c)
+  def block_free(b,avoid): return all(p not in res and p not in avoid and (p not in lis or lis[p]<={"dropbear"}) for p in range(b,b+TLS_BACKENDS))
+  bd=c["bd"]
+  if not block_free(bd,set()): bd=next((b for b in range(40100,40900,TLS_BACKENDS+2) if block_free(b,set())),bd)
+  own=set(range(bd,bd+TLS_BACKENDS)); bt=c["bt"]
+  if not block_free(bt,own): bt=next((b for b in range(bd+TLS_BACKENDS+2,40990,TLS_BACKENDS+2) if block_free(b,own)),bt)
   return bd,bt
 
 def tls_reload():
@@ -1672,6 +1715,7 @@ def _tls_apply(d):
       return 500,{"ok":0,"msg":"TLS front did not start on port(s) %s: %s"%(",".join(map(str,miss)),(j or "see: journalctl -u sshplus-stunnel")[-160:])}
   else:
     for s in reversed(TLS_SVC): cmd(["systemctl","stop",s],20); cmd(["systemctl","disable",s],20)
+  if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()     # publish / withdraw the TLS ports on the exit server
   return 200,{"ok":1,"dropped":dropped,"on":on}
 
 def tls_selfsign():
@@ -1811,6 +1855,41 @@ def _tls_issue(p):
   wjson(TLSC,d0); tj_end(True,dom+" - the certificate renews automatically (certbot timer)")
   return True
 
+def tls_renew_start():
+  c=tls_cfg(); dom=c["domain"]
+  if c["mode"] not in ("own","free") or not dom or not os.path.isdir(os.path.join(le_dir(),"live",dom)):
+    return 400,{"ok":0,"msg":"There is no Let's Encrypt certificate from this panel to renew: use \"Get domain and certificate\" first"}
+  with TJL:
+    if TJ["run"]: return 409,{"ok":0,"msg":"A certificate request is already running"}
+    TJ["run"]=True; TJ["steps"]=[]; TJ["ok"]=None; TJ["domain"]=dom
+  threading.Thread(target=tls_renew_run,args=(dom,),daemon=True).start()
+  return 200,{"ok":1}
+
+def tls_renew_run(dom):
+  ok=False
+  try: ok=_tls_renew(dom)
+  except Exception as e:
+    tj_begin("Internal error"); tj_end(False,str(e)[:200])
+  with TJL: TJ["ok"]=bool(ok); TJ["run"]=False
+
+def _tls_renew(dom):
+  tj_begin("Preparing port 80 (Let's Encrypt validates over HTTP)"); busy=listen_ports().get(80)
+  if busy: tj_end(False,"Port 80 is used by %s. Stop it temporarily and try again."%", ".join(sorted(busy))); return False
+  ufw_open({80}); tj_end(True)
+  tj_begin("Renewing the certificate with Let's Encrypt (about 30 seconds)"); write_hook()
+  rc,o,er=_run(["certbot","renew","--cert-name",dom,"--force-renewal","--non-interactive","--deploy-hook",HOOK_PATH],t=240); out=(o+"\n"+er).strip()
+  if rc!=0:
+    hint=" Let's Encrypt is limiting this domain: try again later." if re.search(r"rateLimited|too many certificates|rate limit",out,re.I) else ""
+    tj_end(False,"certbot failed:"+hint+" "+out[-300:]); return False
+  tj_end(True)
+  tj_begin("Installing the renewed certificate (panel HTTPS + SSH-TLS)")
+  try:
+    live=os.path.join(le_dir(),"live",dom); c1=open(os.path.join(live,"fullchain.pem")).read(); k1=open(os.path.join(live,"privkey.pem")).read()
+  except Exception as e: tj_end(False,"certificate files not found: "+str(e)[:120]); return False
+  code,r=cert_save({"cert":c1,"key":k1})
+  if code!=200: tj_end(False,r.get("msg","rejected")); return False
+  m=cert_meta(); tj_end(True,"%s - valid until %s"%(dom,m.get("end","?"))); return True
+
 def cli_cert_renewed(lineage):
   # called by the certbot deploy hook after a renewal
   dom=str(rjson(TLSC,{}).get("domain","")); lineage=str(lineage).rstrip("/")
@@ -1865,6 +1944,7 @@ def restore_backup(raw,pw):
     if x.get("h"): cmd(["usermod","-p",str(x["h"]),u])
     n+=1
   if os.path.exists(TNET): cmd([TNET,"sync"])
+  sshd_deny_sync()
   for sv in ("sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"): cmd(["systemctl","restart",sv])
   if tls_cfg()["on"]: threading.Thread(target=tls_apply,args=({"on":True},),daemon=True).start()
   if tconf().get("TUN_HOST"):
@@ -2080,10 +2160,12 @@ def sub_data(u,hosthdr):
   else: ssh=sorted(sshd_ports())
   x.update({"host":host,"ssh":ssh,"db":dbl,"in":"B" if inB else "A","out":"B" if out else "A","exit":(tc["exit"] or tc["host"]) if out else host})
   tl=tls_cfg(); x["tls"]=None
-  if tl["on"] and x.get("cx","both")!="normal" and not inB:        # SSH over TLS: the TLS host is the domain if there is one
-    th=tl["domain"] or host
-    x["tls"]={"host":th,"ports":list(tl["tports" if out else "ports"]),"sni":tl["domain"],"insecure":tl["mode"]=="self"}
-    if x["cx"]=="tls": x["db"]=[]; x["ssh"]=[]                    # TLS-only account: do not offer the plain ports
+  if tl["on"] and x.get("cx","both")!="normal":                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
+    tp=list(tl["tports" if out else "ports"])
+    if inB: mp2={r["a"]:r["b"] for r in tc["rev_map"]}; tp=[mp2[p] for p in tp if p in mp2]
+    if tp:
+      x["tls"]={"host":host if inB else (tl["domain"] or host),"ports":tp,"sni":tl["domain"],"insecure":tl["mode"]=="self"}
+      if x["cx"]=="tls": x["db"]=[]; x["ssh"]=[]                  # TLS-only account: do not offer the plain ports
   return x
 
 def ssh_uri(x):
@@ -2318,6 +2400,7 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/tls/save": c,r=tls_apply(d); s.js(r,c)
       elif p=="/api/tls/issue": c,r=tls_issue_start(d); s.js(r,c)
       elif p=="/api/tls/self": c,r=tls_selfsign(); s.js(r,c)
+      elif p=="/api/tls/renew": c,r=tls_renew_start(); s.js(r,c)
       elif p=="/api/plainsub":
         c2=rjson(CFG,{"port":2053,"username":"admin","password":"admin"}); c2["plain_sub"]=bool(d.get("on")); wjson(CFG,c2); s.js({"ok":1,"plain_sub":c2["plain_sub"]})
       elif p=="/api/telegram": c,r=tg_save(d); s.js(r,c)
@@ -2619,12 +2702,15 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
         <div><label>پورت(های) TLS اکانت‌های تانل</label><input id="tlsP2" dir="ltr" placeholder="8843"></div>
       </div>
       <button class="btn btn-s" onclick="tlsPorts()">💾 ذخیره‌ی پورت‌ها</button>
-      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• پورت‌های OpenSSH (مثل 22) به نوع اتصال وابسته نیستند و همه‌ی اکانت‌های پنل روی آن‌ها کار می‌کنند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsNote">SSH داخل یک اتصال TLS قرار می‌گیرد؛ برای برنامه‌ها یا شبکه‌هایی که اتصال TLS/SNI می‌خواهند.<br>• اکانت «فقط معمولی» روی پورت TLS وارد نمی‌شود و اکانت «فقط TLS» روی پورت‌های Dropbear معمولی وارد نمی‌شود.<br>• روی پورت‌های OpenSSH (مثل 22) هم اکانت «فقط TLS» وارد نمی‌شود؛ اکانت‌های «معمولی» و «هر دو» وارد می‌شوند.<br>• اکانت‌های تانل پورت TLS جداگانه دارند (از مسیر تانل خارج می‌شوند).<br>• فرمت لینک <span dir="ltr">ssh://</span> برای TLS استاندارد نیست؛ اگر برنامه‌ات نپذیرفت آدرس، پورت و SNI را دستی وارد کن.</div>
     </div>
     <div class="card">
       <h3 style="margin-bottom:.7rem;color:var(--pr)">📜 گواهی فعلی</h3>
       <div id="tlsCert" style="font-size:.85rem;line-height:1.9;margin-bottom:.6rem"></div>
-      <button class="btn btn-s btn-w" onclick="tlsSelf()">↩️ بازگشت به گواهی self-signed</button>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap">
+        <button class="btn btn-s btn-o" id="tlsRenewBtn" onclick="tlsRenew()">🔄 تمدید گواهی</button>
+        <button class="btn btn-s btn-w" onclick="tlsSelf()">↩️ بازگشت به گواهی self-signed</button>
+      </div>
       <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-top:.8rem" data-th="tlsShared">همین گواهی و دامنه برای HTTPS خودِ پنل هم استفاده می‌شود؛ جای دیگری چیزی لازم نیست تنظیم شود.</div>
     </div>
   </div>
@@ -2774,7 +2860,7 @@ const $=id=>document.getElementById(id);
 // ---- language: fa (default) / en. Static labels: EN dictionary; paragraphs: data-th blocks; JS sentences: L(fa,en)
 let LANG="fa"; try{LANG=localStorage.getItem("lang")==="en"?"en":"fa"}catch(e){}
 const L=(fa,en)=>LANG==="en"?en:fa;
-const EN={"👥 کاربران": "👥 Users", "🌐 تانل": "🌐 Tunnel", "📈 آمار": "📈 Statistics", "⚙️ تنظیمات سرور": "⚙️ Server settings", "ورود / Login": "Login", "بستن": "Close", "ذخیره": "Save", "💾 ذخیره": "💾 Save", "ذخیره و ادامه": "Save and continue", "(ذخیره شده)": "(saved)", "وضعیت": "Status", "نوع": "Type", "فعال": "Active", "غیرفعال": "Disabled", "آنلاین / کل کاربران": "Online / Total users", "تانل / Dropbear تانل": "Tunnel / Tunnel Dropbear", "BBR / منابع": "BBR / Resources", "🔌 پورت‌های فعال:": "🔌 Active ports:", "رمز عبور": "Password", "🔐 تغییر رمز پیش‌فرض": "🔐 Change the default password", "رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).": "The default password (admin) is not secure. Choose a new one to continue (at least 8 characters).", "رمز جدید": "New password", "تکرار رمز": "Repeat password", "➕ ساخت کاربر جدید": "➕ Create new user", "قالب:": "Template:", "— بدون قالب —": "— No template —", "💾 ذخیره فرم به‌عنوان قالب": "💾 Save form as template", "نام کاربری (انگلیسی)": "Username (English letters)", "پورت پیشنهادی": "Suggested port", "پورت پیشنهادی (فقط برای نمایش/کپی)": "Suggested port (display/copy only)", "حجم (GB | 0=نامحدود)": "Quota (GB | 0 = unlimited)", "روز اعتبار": "Validity (days)", "کاربر همزمان": "Concurrent users", "— به کدام سرور وصل شود": "— which server the user connects to", "— با IP کدام سرور خارج شود": "— whose IP the user leaves with", "سرور ۱": "Server 1", "سرور ۲": "Server 2", "سرور ۱ (این سرور)": "Server 1 (this server)", "سرور ۲ (سرور تانل)": "Server 2 (tunnel server)", "سرور ۲ (تانل نصب نیست)": "Server 2 (tunnel not installed)", "ایجاد اکانت": "Create account", "همه پورت‌ها": "All ports", "📦 ساخت دسته‌ای اکانت": "📦 Bulk account creation", "پیشوند نام": "Name prefix", "تعداد (۱ تا ۲۰۰)": "Count (1 to 200)", "شروع شماره": "Start number", "رمز (خالی = تصادفی برای هر اکانت)": "Password (empty = random per account)", "ایجاد اکانت‌ها": "Create accounts", "📋 لیست کاربران": "📋 Users", "📋 کپی": "📋 Copy", "⬇️ دانلود CSV": "⬇️ Download CSV", "ویرایش کاربر": "Edit user", "رمز جدید (خالی = بدون تغییر)": "New password (empty = unchanged)", "تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر": "Renew: validity from today (days) — empty/0 = unchanged", "صفر کردن ترافیک مصرفی": "Reset used traffic", "با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.": "Changing In/Out cuts this user's active connections.", "لینک اشتراک و QR": "Subscription link & QR", "📋 کپی لینک اشتراک": "📋 Copy subscription link", "🔗 باز کردن": "🔗 Open", "🌐 وضعیت تانل": "🌐 Tunnel status", "🚀 نصب و اتصال تانل (یک کلیک)": "🚀 Install & connect the tunnel (one click)", "IP یا دامنه‌ی سرور جدید (خروجی)": "IP or domain of the new (exit) server", "پورت SSH": "SSH port", "کاربر (باید root باشد)": "User (must be root)", "رمز SSH سرور جدید": "SSH password of the new server", "⚡ نصب و برقراری تانل": "⚡ Install & connect the tunnel", "♻️ نصب مجدد / تغییر سرور": "♻️ Reinstall / change server", "⏳ در حال نصب...": "⏳ Installing...", "🔍 تست خروجی": "🔍 Test exit", "🔄 ری‌استارت تانل": "🔄 Restart tunnel", "🗑️ حذف تانل": "🗑️ Remove tunnel", "تانل نصب نشده": "Tunnel not installed", "🟢 متصل": "🟢 Connected", "🔴 قطع / در حال اتصال": "🔴 Down / connecting", "هنوز تانلی تنظیم نشده. فرم کناری را پر کن.": "No tunnel is configured yet. Fill in the form beside this.", "↔️ مسیر دوطرفه (همیشه فعال)": "↔️ Two-way routing (always on)", "🔌 هماهنگی پورت‌ها و فایروال دو سرور": "🔌 Port coordination & firewalls (both servers)", "پورت سرور ۱": "Port on server 1", "پورت روی سرور ۲": "Port on server 2", "Dropbear تانل": "Tunnel Dropbear", "SSH دوم": "2nd SSH", "هم‌شماره": "Same number", "جابه‌جا شد (مشغول بود)": "Moved (port was busy)", "منتشر نشد": "Not published", "هنوز پورتی منتشر نشده": "No port published yet", "اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.": "If another program has taken this server's Dropbear port, it is replaced by a free one automatically. If a port is busy on server 2, it is published there under another number (this server's ports and existing client configs do not change). The firewall (ufw or firewalld) of both servers is opened for the ports. The same check also runs automatically on every panel start, tunnel install and port change.", "🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور": "🔍 Check & fix conflicts + update the firewalls of both servers", "📜 مراحل نصب": "📜 Installation steps", "هنوز نصبی انجام نشده.": "No installation has been run yet.", "🌐 وضعیت تانل (۲۴ ساعت گذشته)": "🌐 Tunnel status (last 24 hours)", "خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده": "Blue line: latency (ms) · red bar: the tunnel was down", "🖥️ بار سرور (۲۴ ساعت)": "🖥️ Server load (24 h)", "آبی: CPU · نارنجی: RAM": "Blue: CPU · orange: RAM", "📊 مصرف روزانه‌ی کل (۱۴ روز)": "📊 Total daily traffic (14 days)", "🏆 پرمصرف‌ترین کاربران (۷ روز)": "🏆 Top users (7 days)", "تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).": "No tunnel configured or no sample recorded yet (one sample per minute).", "هنوز داده‌ای ثبت نشده": "No data recorded yet", "داده‌ای ثبت نشده": "No data recorded", "🚀 BBR (کنترل ازدحام TCP)": "🚀 BBR (TCP congestion control)", "الگوریتم فعلی": "Current algorithm", "کرنل پشتیبانی نمی‌کند": "Kernel does not support it", "⛔ خاموش کردن BBR": "⛔ Turn BBR off", "🚀 روشن کردن BBR": "🚀 Turn BBR on", "روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.": "Applies to new connections; existing connections keep the previous algorithm until they reconnect.", "👤 نام کاربری و رمز ادمین پنل": "👤 Panel admin username & password", "نام کاربری ادمین": "Admin username", "رمز جدید ادمین": "New admin password", "🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)": "🔌 OpenSSH & Dropbear ports (max 6)", "پورت SSH دوم": "Second SSH port", "پورت SSH اصلی (پنل)": "Main SSH port (panel)", "🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)": "🌐 Dropbear ports for tunnel accounts (max 4)", "ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)": "Save ports (Dropbear connections are briefly dropped)", "پورت (TCP داخل تونل)": "Port (TCP inside the tunnel)", "0.0.0.0 (عمومی)": "0.0.0.0 (public)", "127.0.0.1 (امن)": "127.0.0.1 (safe)", "ذخیره و ری‌استارت BadVPN": "Save and restart BadVPN", "🔒 HTTPS و گواهی": "🔒 HTTPS & certificate", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.": "The panel is served over HTTPS on this port (an old http address is redirected to https automatically). The default certificate is self-signed, so the browser warns. If you have a domain, put a valid certificate (for example from Let's Encrypt) here.", "گواهی (fullchain، فرمت PEM)": "Certificate (fullchain, PEM format)", "کلید خصوصی (PEM)": "Private key (PEM)", "آپلود گواهی": "Upload certificate", "💾 بکاپ و بازیابی": "💾 Backup & restore", "کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.": "Users, quotas, settings, ports, the tunnel key and Telegram in one encrypted file. Do not lose the passphrase; without it the file cannot be restored.", "پسفریز (حداقل ۶ کاراکتر)": "Passphrase (at least 6 characters)", "⬇️ دانلود بکاپ": "⬇️ Download backup", "بازیابی از فایل بکاپ (.ckbk)": "Restore from backup file (.ckbk)", "⬆️ بازیابی (پنل ری‌استارت می‌شود)": "⬆️ Restore (the panel restarts)", "🤖 ربات و هشدار تلگرام": "🤖 Telegram bot & alerts", "توکن ربات": "Bot token", "پسفریز بکاپ خودکار": "Automatic backup passphrase", "ساعت بکاپ روزانه (۰ تا ۲۳)": "Daily backup hour (0 to 23)", "قطع/وصل تانل": "Tunnel down/up", "۹۰٪ و پر شدن حجم": "90% and quota full", "نزدیک/پایان انقضا": "Expiry near/reached", "فشار CPU/RAM": "High CPU/RAM load", "بکاپ روزانه به تلگرام": "Daily backup to Telegram", "📨 پیام آزمایشی": "📨 Test message", "🔎 پیدا کردن Chat ID": "🔎 Find Chat ID", "💾 ارسال بکاپ همین حالا": "💾 Send a backup now", "ℹ️ نحوه‌ی کار": "ℹ️ How it works", "رمز باید حداقل ۸ کاراکتر و غیر از admin باشد": "The password must be at least 8 characters and not 'admin'", "تکرار رمز یکسان نیست": "The passwords do not match", "تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید": "Too many failed attempts; wait 5 minutes", "نام کاربری یا رمز عبور اشتباه است": "Wrong username or password", "پورت‌ها ذخیره شد": "Ports saved", "BadVPN به‌روز شد": "BadVPN updated", "نام کاربری یا رمز جدید را وارد کنید": "Enter a new username or password", "مشخصات ورود تغییر کرد": "Login details changed", "IP و رمز سرور جدید را وارد کن": "Enter the IP and password of the new server", "گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)": "New certificate activated (new connections will use it)", "پسفریز حداقل ۶ کاراکتر": "The passphrase must be at least 6 characters", "فایل بکاپ را انتخاب کن": "Choose the backup file", "پسفریز را وارد کن": "Enter the passphrase", "بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟": "Restore will overwrite the current settings and users. Continue?", "ذخیره شد": "Saved", "پیام ارسال شد": "Message sent", "ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن": "Not sent: check the token/Chat ID or the connection to Telegram (direct and through the tunnel)", "پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن": "No message found. First send /start to the bot, then try again", "بکاپ به تلگرام ارسال شد": "Backup sent to Telegram", "نام قالب:": "Template name:", "پیشوند نام را وارد کن": "Enter a name prefix", "⏳ در حال ساخت...": "⏳ Creating...", "لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن": "The link has not been created yet; try again in a few seconds", "QR در دسترس نیست": "QR unavailable", "ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین": "Restarted; check the status in a few seconds", "تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند.": "Remove the tunnel? Tunnel accounts will become “Direct”.", "✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.": "✔ The tunnel is up. In “Create new user” choose “Server 2” for Out.", "✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.": "✖ Installation failed; no change was made to existing users.", "تانل سالم است": "Tunnel is healthy", "بررسی ابزارهای لازم": "Checking the required tools", "ساخت کلید SSH مخصوص تانل": "Creating the tunnel's SSH key", "تست ورود با کلید": "Testing the key login", "آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)": "Preparing the exit server (PermitTunnel / forwarding / NAT)", "راه‌اندازی تانل روی این سرور": "Starting the tunnel on this server", "انتظار برای برقراری تانل": "Waiting for the tunnel to come up", "تست خروجی اینترنت از مسیر تانل": "Testing internet access through the tunnel", "خطای داخلی": "Internal error", "رمز عبور یا نام کاربری اشتباه است (wrong password/user)": "Wrong password or username", "کاربر باید root باشد (برای ساخت کارت شبکه تانل)": "The user must be root (needed to create the tunnel network device)", "کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)": "SSH key installed on the exit server (the password is not stored)", "PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد": "PermitTunnel + ip_forward + NAT enabled on the exit server", "تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)": "The tunnel is up but the internet test through it got no answer (does the exit server have internet?)", "📋 لینک اشتراک (برای برنامه‌ها)": "📋 Subscription link (for apps)", "📋 متن ساده": "📋 Plain-text list", "📋 لینک SSH": "📋 SSH link", "📋 لینک SSH (base64)": "📋 SSH link (base64 login)", "🔗 باز کردن صفحه": "🔗 Open the page", "اگر برنامه‌ی تانل لینک را نپذیرفت، یکی از حالت‌های دیگر را امتحان کن. برنامه‌هایی که گواهی self-signed را رد می‌کنند به گواهی معتبر نیاز دارند، یا لینک اشتراک را روی HTTP ساده فعال کن (تنظیمات ← HTTPS).": "If a tunnel app does not accept the link, try one of the other formats. Apps that reject a self-signed certificate need a valid certificate, or enable the subscription link over plain HTTP (Settings → HTTPS).", "اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)": "Allow the subscription link over plain HTTP (for apps that do not accept a self-signed certificate)", "⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.": "⚠️ The account password is inside the link and can be sniffed on the way over plain HTTP. Turn it on only if you need it; the rest of the panel always stays HTTPS.", "🔒 TLS و دامنه": "🔒 TLS & Domain", "نوع اتصال": "Connection type", "فقط TLS": "TLS only", "🔒 SSH روی TLS": "🔒 SSH over TLS", "فعال‌سازی SSH روی TLS": "Enable SSH over TLS", "پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)": "TLS port(s) for normal accounts (comma-separated)", "پورت(های) TLS اکانت‌های تانل": "TLS port(s) for tunnel accounts", "💾 ذخیره‌ی پورت‌ها": "💾 Save ports", "📜 گواهی فعلی": "📜 Current certificate", "↩️ بازگشت به گواهی self-signed": "↩️ Back to a self-signed certificate", "🌍 دامنه و گواهی (یک‌کلیک)": "🌍 Domain and certificate (one click)", "منبع دامنه": "Domain source", "دامنه‌ی رایگان (خودکار)": "Free domain (automatic)", "دامنه‌ی خودم را دارم": "I have my own domain", "ایمیل (اختیاری؛ برای هشدار انقضا از Let's Encrypt)": "E-mail (optional; Let's Encrypt expiry warnings)", "سرویس دامنه‌ی رایگان": "Free-domain service", "sslip.io — بدون ثبت‌نام": "sslip.io — no sign-up", "nip.io — بدون ثبت‌نام": "nip.io — no sign-up", "DuckDNS — زیردامنه‌ی ثابت (حساب رایگان لازم است)": "DuckDNS — fixed sub-domain (free account needed)", "سرویس wildcard-DNS دیگر (خودت وارد کن)": "Another wildcard-DNS service (enter it yourself)", "نام زیردامنه در DuckDNS": "DuckDNS sub-domain name", "توکن DuckDNS": "DuckDNS token", "پسوند سرویس (مثلاً sslip.io)": "Service suffix (e.g. sslip.io)", "دامنه‌ی شما": "Your domain", "⚡ دریافت دامنه و گواهی": "⚡ Get domain and certificate", "⏳ در حال دریافت...": "⏳ Working...", "⬆️ آپلود گواهی دلخواه (PEM)": "⬆️ Upload your own certificate (PEM)", "دامنه‌ی این گواهی (برای لینک‌ها و SNI)": "Domain of this certificate (used in links and SNI)", "🔒 رفتن به تب TLS و دامنه": "🔒 Go to the TLS & Domain tab", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی و دامنه در تب «TLS و دامنه» مدیریت می‌شود (یک گواهی برای HTTPS پنل و SSH روی TLS)؛ گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد.": "The panel uses HTTPS on this same port (an old http address redirects to https automatically). The certificate and domain are managed in the “TLS & Domain” tab (one certificate for the panel's HTTPS and for SSH over TLS); the default certificate is self-signed and the browser shows a warning.", "خاموش": "Off", "🟢 فعال": "🟢 Active", "🔴 سرویس بالا نیست": "🔴 Service is not running", "دامنه را وارد کن": "Enter the domain", "به گواهی self-signed برگردیم؟ دامنه‌ی فعلی پاک می‌شود.": "Go back to a self-signed certificate? The current domain will be cleared.", "معمولی + TLS": "Normal + TLS", "فقط معمولی": "Normal only"}, ENP=[["ویرایش: {0}", "Edit: {0}"], ["پورت‌های فعال sshd: {0} (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)", "Active sshd ports: {0} (ports defined outside the panel, such as your own main port, are never touched)"], ["دسترس‌پذیری ۲۴ ساعت: {0}٪ · میانگین تأخیر: {1} ms · {2} نمونه قطع", "24 h availability: {0}% · average latency: {1} ms · {2} samples down"], ["بازیابی انجام شد ({0} کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.", "Restore finished ({0} users). The panel restarts in a few seconds; log in again."], ["ارسال نشد: {0}", "Not sent: {0}"], ["قالب «{0}» حذف شود؟", "Delete template “{0}”?"], ["{0} اکانت با پیشوند {1} ساخته شود؟", "Create {0} accounts with prefix {1}?"], ["تانل سالم است. IP خروجی: {0}", "The tunnel is healthy. Exit IP: {0}"], ["تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: {0}", "Tunnel removed. Accounts converted to Direct: {0}"], ["اتصال به {0}:{1} با رمز و نصب کلید", "Connecting to {0}:{1} with the password and installing the key"], ["اتصال SSH برقرار نشد: {0}", "SSH connection failed: {0}"], ["ورود با کلید ناموفق: {0}", "Key login failed: {0}"], ["تداخل پورت روی این سرور رفع شد: {0}", "Port conflicts on this server were fixed: {0}"], ["تانل بالا نیامد: {0}", "The tunnel did not come up: {0}"], ["IP خروجی تانل: {0}", "Tunnel exit IP: {0}"]], HT={"tnNote": "The password is only used to install an SSH key and is not stored; after that the link uses the key.<br>⚠️ If you prefer not to type the server's password into the web page, run this in a terminal on this server:<br><code dir=\"ltr\">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code>", "biNote": "When creating an account the admin has two choices, <bdi dir=\"ltr\"><b>In</b></bdi> and <bdi dir=\"ltr\"><b>Out</b></bdi>: <bdi dir=\"ltr\"><b>In</b></bdi> is which server's IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is which server's IP the user reaches the internet with. All four combinations (<span dir=\"ltr\">1→1</span>, <span dir=\"ltr\">1→2</span>, <span dir=\"ltr\">2→1</span>, <span dir=\"ltr\">2→2</span>) are active and UDPGW (games/calls) works on all of them. No separate mode needs to be configured.", "how": "<bdi dir=\"ltr\"><b>In</b></bdi> is the server whose IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is the server whose IP is seen on the internet. “Server 1” is this server and “Server 2” is the tunnel server.<br>\n    1) When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2”, the traffic goes through the tunnel. This account works on the <b>SSH (OpenSSH)</b> ports and the <b>tunnel Dropbear</b> ports; the normal Dropbear ports are only for accounts whose <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 1”. Ports can be changed in the Settings tab.<br>\n    2) When <bdi dir=\"ltr\"><b>In</b></bdi> is “Server 2”, this server's ports are opened on server 2 and forwarded through the tunnel to this server. Port 22 and any port server 2 itself listens on are never touched, so admin access to both servers and to the panel always stays open. The firewall of server 2 must allow these ports and the real IP of the user is not visible on this server.<br>\n    3) If the tunnel goes down, every path that goes through it is <b>blocked</b> (instead of leaking out through the direct IP). It reconnects automatically.<br>\n    4) UDPGW (games/calls) works on all four combinations. When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2” it goes through the tunnel. The client keeps using <span dir=\"ltr\">127.0.0.1:7300</span>.<br>\n    5) The tunnel runs over SSH (TCP); for better speed keep BBR on for both servers.", "tgNote": "First create a bot in Telegram with @BotFather and paste the token here; then send <span dir=\"ltr\">/start</span> to the bot and press “Find Chat ID”. If Telegram cannot be reached from this server, the panel automatically sends through the tunnel.", "tgCmd": "Bot commands (only from the configured Chat ID): <span dir=\"ltr\">/status /users /online /backup</span>", "tlsNote": "SSH is wrapped inside a TLS connection, for apps or networks that want TLS/SNI.<br>• A “Normal only” account cannot log in on a TLS port, and a “TLS only” account cannot log in on the plain Dropbear ports.<br>• OpenSSH ports (such as 22) do not depend on the connection type: every panel account works on them.<br>• Tunnel accounts have their own TLS port (they exit through the tunnel).<br>• The <span dir=\"ltr\">ssh://</span> link format for TLS is not standardised; if your app does not accept it, enter the address, port and SNI by hand.", "tlsShared": "This same certificate and domain are also used for the panel's own HTTPS; nothing else needs to be set up elsewhere."};
+const EN={"👥 کاربران": "👥 Users", "🌐 تانل": "🌐 Tunnel", "📈 آمار": "📈 Statistics", "⚙️ تنظیمات سرور": "⚙️ Server settings", "ورود / Login": "Login", "بستن": "Close", "ذخیره": "Save", "💾 ذخیره": "💾 Save", "ذخیره و ادامه": "Save and continue", "(ذخیره شده)": "(saved)", "وضعیت": "Status", "نوع": "Type", "فعال": "Active", "غیرفعال": "Disabled", "آنلاین / کل کاربران": "Online / Total users", "تانل / Dropbear تانل": "Tunnel / Tunnel Dropbear", "BBR / منابع": "BBR / Resources", "🔌 پورت‌های فعال:": "🔌 Active ports:", "رمز عبور": "Password", "🔐 تغییر رمز پیش‌فرض": "🔐 Change the default password", "رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).": "The default password (admin) is not secure. Choose a new one to continue (at least 8 characters).", "رمز جدید": "New password", "تکرار رمز": "Repeat password", "➕ ساخت کاربر جدید": "➕ Create new user", "قالب:": "Template:", "— بدون قالب —": "— No template —", "💾 ذخیره فرم به‌عنوان قالب": "💾 Save form as template", "نام کاربری (انگلیسی)": "Username (English letters)", "پورت پیشنهادی": "Suggested port", "پورت پیشنهادی (فقط برای نمایش/کپی)": "Suggested port (display/copy only)", "حجم (GB | 0=نامحدود)": "Quota (GB | 0 = unlimited)", "روز اعتبار": "Validity (days)", "کاربر همزمان": "Concurrent users", "— به کدام سرور وصل شود": "— which server the user connects to", "— با IP کدام سرور خارج شود": "— whose IP the user leaves with", "سرور ۱": "Server 1", "سرور ۲": "Server 2", "سرور ۱ (این سرور)": "Server 1 (this server)", "سرور ۲ (سرور تانل)": "Server 2 (tunnel server)", "سرور ۲ (تانل نصب نیست)": "Server 2 (tunnel not installed)", "ایجاد اکانت": "Create account", "همه پورت‌ها": "All ports", "📦 ساخت دسته‌ای اکانت": "📦 Bulk account creation", "پیشوند نام": "Name prefix", "تعداد (۱ تا ۲۰۰)": "Count (1 to 200)", "شروع شماره": "Start number", "رمز (خالی = تصادفی برای هر اکانت)": "Password (empty = random per account)", "ایجاد اکانت‌ها": "Create accounts", "📋 لیست کاربران": "📋 Users", "📋 کپی": "📋 Copy", "⬇️ دانلود CSV": "⬇️ Download CSV", "ویرایش کاربر": "Edit user", "رمز جدید (خالی = بدون تغییر)": "New password (empty = unchanged)", "تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر": "Renew: validity from today (days) — empty/0 = unchanged", "صفر کردن ترافیک مصرفی": "Reset used traffic", "با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.": "Changing In/Out cuts this user's active connections.", "لینک اشتراک و QR": "Subscription link & QR", "📋 کپی لینک اشتراک": "📋 Copy subscription link", "🔗 باز کردن": "🔗 Open", "🌐 وضعیت تانل": "🌐 Tunnel status", "🚀 نصب و اتصال تانل (یک کلیک)": "🚀 Install & connect the tunnel (one click)", "IP یا دامنه‌ی سرور جدید (خروجی)": "IP or domain of the new (exit) server", "پورت SSH": "SSH port", "کاربر (باید root باشد)": "User (must be root)", "رمز SSH سرور جدید": "SSH password of the new server", "⚡ نصب و برقراری تانل": "⚡ Install & connect the tunnel", "♻️ نصب مجدد / تغییر سرور": "♻️ Reinstall / change server", "⏳ در حال نصب...": "⏳ Installing...", "🔍 تست خروجی": "🔍 Test exit", "🔄 ری‌استارت تانل": "🔄 Restart tunnel", "🗑️ حذف تانل": "🗑️ Remove tunnel", "تانل نصب نشده": "Tunnel not installed", "🟢 متصل": "🟢 Connected", "🔴 قطع / در حال اتصال": "🔴 Down / connecting", "هنوز تانلی تنظیم نشده. فرم کناری را پر کن.": "No tunnel is configured yet. Fill in the form beside this.", "↔️ مسیر دوطرفه (همیشه فعال)": "↔️ Two-way routing (always on)", "🔌 هماهنگی پورت‌ها و فایروال دو سرور": "🔌 Port coordination & firewalls (both servers)", "پورت سرور ۱": "Port on server 1", "پورت روی سرور ۲": "Port on server 2", "Dropbear تانل": "Tunnel Dropbear", "SSH دوم": "2nd SSH", "هم‌شماره": "Same number", "جابه‌جا شد (مشغول بود)": "Moved (port was busy)", "منتشر نشد": "Not published", "هنوز پورتی منتشر نشده": "No port published yet", "اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.": "If another program has taken this server's Dropbear port, it is replaced by a free one automatically. If a port is busy on server 2, it is published there under another number (this server's ports and existing client configs do not change). The firewall (ufw or firewalld) of both servers is opened for the ports. The same check also runs automatically on every panel start, tunnel install and port change.", "🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور": "🔍 Check & fix conflicts + update the firewalls of both servers", "📜 مراحل نصب": "📜 Installation steps", "هنوز نصبی انجام نشده.": "No installation has been run yet.", "🌐 وضعیت تانل (۲۴ ساعت گذشته)": "🌐 Tunnel status (last 24 hours)", "خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده": "Blue line: latency (ms) · red bar: the tunnel was down", "🖥️ بار سرور (۲۴ ساعت)": "🖥️ Server load (24 h)", "آبی: CPU · نارنجی: RAM": "Blue: CPU · orange: RAM", "📊 مصرف روزانه‌ی کل (۱۴ روز)": "📊 Total daily traffic (14 days)", "🏆 پرمصرف‌ترین کاربران (۷ روز)": "🏆 Top users (7 days)", "تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).": "No tunnel configured or no sample recorded yet (one sample per minute).", "هنوز داده‌ای ثبت نشده": "No data recorded yet", "داده‌ای ثبت نشده": "No data recorded", "🚀 BBR (کنترل ازدحام TCP)": "🚀 BBR (TCP congestion control)", "الگوریتم فعلی": "Current algorithm", "کرنل پشتیبانی نمی‌کند": "Kernel does not support it", "⛔ خاموش کردن BBR": "⛔ Turn BBR off", "🚀 روشن کردن BBR": "🚀 Turn BBR on", "روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.": "Applies to new connections; existing connections keep the previous algorithm until they reconnect.", "👤 نام کاربری و رمز ادمین پنل": "👤 Panel admin username & password", "نام کاربری ادمین": "Admin username", "رمز جدید ادمین": "New admin password", "🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)": "🔌 OpenSSH & Dropbear ports (max 6)", "پورت SSH دوم": "Second SSH port", "پورت SSH اصلی (پنل)": "Main SSH port (panel)", "🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)": "🌐 Dropbear ports for tunnel accounts (max 4)", "ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)": "Save ports (Dropbear connections are briefly dropped)", "پورت (TCP داخل تونل)": "Port (TCP inside the tunnel)", "0.0.0.0 (عمومی)": "0.0.0.0 (public)", "127.0.0.1 (امن)": "127.0.0.1 (safe)", "ذخیره و ری‌استارت BadVPN": "Save and restart BadVPN", "🔒 HTTPS و گواهی": "🔒 HTTPS & certificate", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.": "The panel is served over HTTPS on this port (an old http address is redirected to https automatically). The default certificate is self-signed, so the browser warns. If you have a domain, put a valid certificate (for example from Let's Encrypt) here.", "گواهی (fullchain، فرمت PEM)": "Certificate (fullchain, PEM format)", "کلید خصوصی (PEM)": "Private key (PEM)", "آپلود گواهی": "Upload certificate", "💾 بکاپ و بازیابی": "💾 Backup & restore", "کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.": "Users, quotas, settings, ports, the tunnel key and Telegram in one encrypted file. Do not lose the passphrase; without it the file cannot be restored.", "پسفریز (حداقل ۶ کاراکتر)": "Passphrase (at least 6 characters)", "⬇️ دانلود بکاپ": "⬇️ Download backup", "بازیابی از فایل بکاپ (.ckbk)": "Restore from backup file (.ckbk)", "⬆️ بازیابی (پنل ری‌استارت می‌شود)": "⬆️ Restore (the panel restarts)", "🤖 ربات و هشدار تلگرام": "🤖 Telegram bot & alerts", "توکن ربات": "Bot token", "پسفریز بکاپ خودکار": "Automatic backup passphrase", "ساعت بکاپ روزانه (۰ تا ۲۳)": "Daily backup hour (0 to 23)", "قطع/وصل تانل": "Tunnel down/up", "۹۰٪ و پر شدن حجم": "90% and quota full", "نزدیک/پایان انقضا": "Expiry near/reached", "فشار CPU/RAM": "High CPU/RAM load", "بکاپ روزانه به تلگرام": "Daily backup to Telegram", "📨 پیام آزمایشی": "📨 Test message", "🔎 پیدا کردن Chat ID": "🔎 Find Chat ID", "💾 ارسال بکاپ همین حالا": "💾 Send a backup now", "ℹ️ نحوه‌ی کار": "ℹ️ How it works", "رمز باید حداقل ۸ کاراکتر و غیر از admin باشد": "The password must be at least 8 characters and not 'admin'", "تکرار رمز یکسان نیست": "The passwords do not match", "تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید": "Too many failed attempts; wait 5 minutes", "نام کاربری یا رمز عبور اشتباه است": "Wrong username or password", "پورت‌ها ذخیره شد": "Ports saved", "BadVPN به‌روز شد": "BadVPN updated", "نام کاربری یا رمز جدید را وارد کنید": "Enter a new username or password", "مشخصات ورود تغییر کرد": "Login details changed", "IP و رمز سرور جدید را وارد کن": "Enter the IP and password of the new server", "گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)": "New certificate activated (new connections will use it)", "پسفریز حداقل ۶ کاراکتر": "The passphrase must be at least 6 characters", "فایل بکاپ را انتخاب کن": "Choose the backup file", "پسفریز را وارد کن": "Enter the passphrase", "بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟": "Restore will overwrite the current settings and users. Continue?", "ذخیره شد": "Saved", "پیام ارسال شد": "Message sent", "ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن": "Not sent: check the token/Chat ID or the connection to Telegram (direct and through the tunnel)", "پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن": "No message found. First send /start to the bot, then try again", "بکاپ به تلگرام ارسال شد": "Backup sent to Telegram", "نام قالب:": "Template name:", "پیشوند نام را وارد کن": "Enter a name prefix", "⏳ در حال ساخت...": "⏳ Creating...", "لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن": "The link has not been created yet; try again in a few seconds", "QR در دسترس نیست": "QR unavailable", "ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین": "Restarted; check the status in a few seconds", "تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند.": "Remove the tunnel? Tunnel accounts will become “Direct”.", "✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.": "✔ The tunnel is up. In “Create new user” choose “Server 2” for Out.", "✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.": "✖ Installation failed; no change was made to existing users.", "تانل سالم است": "Tunnel is healthy", "بررسی ابزارهای لازم": "Checking the required tools", "ساخت کلید SSH مخصوص تانل": "Creating the tunnel's SSH key", "تست ورود با کلید": "Testing the key login", "آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)": "Preparing the exit server (PermitTunnel / forwarding / NAT)", "راه‌اندازی تانل روی این سرور": "Starting the tunnel on this server", "انتظار برای برقراری تانل": "Waiting for the tunnel to come up", "تست خروجی اینترنت از مسیر تانل": "Testing internet access through the tunnel", "خطای داخلی": "Internal error", "رمز عبور یا نام کاربری اشتباه است (wrong password/user)": "Wrong password or username", "کاربر باید root باشد (برای ساخت کارت شبکه تانل)": "The user must be root (needed to create the tunnel network device)", "کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)": "SSH key installed on the exit server (the password is not stored)", "PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد": "PermitTunnel + ip_forward + NAT enabled on the exit server", "تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)": "The tunnel is up but the internet test through it got no answer (does the exit server have internet?)", "📋 لینک اشتراک (برای برنامه‌ها)": "📋 Subscription link (for apps)", "📋 متن ساده": "📋 Plain-text list", "📋 لینک SSH": "📋 SSH link", "📋 لینک SSH (base64)": "📋 SSH link (base64 login)", "🔗 باز کردن صفحه": "🔗 Open the page", "اگر برنامه‌ی تانل لینک را نپذیرفت، یکی از حالت‌های دیگر را امتحان کن. برنامه‌هایی که گواهی self-signed را رد می‌کنند به گواهی معتبر نیاز دارند، یا لینک اشتراک را روی HTTP ساده فعال کن (تنظیمات ← HTTPS).": "If a tunnel app does not accept the link, try one of the other formats. Apps that reject a self-signed certificate need a valid certificate, or enable the subscription link over plain HTTP (Settings → HTTPS).", "اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)": "Allow the subscription link over plain HTTP (for apps that do not accept a self-signed certificate)", "⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.": "⚠️ The account password is inside the link and can be sniffed on the way over plain HTTP. Turn it on only if you need it; the rest of the panel always stays HTTPS.", "🔒 TLS و دامنه": "🔒 TLS & Domain", "نوع اتصال": "Connection type", "فقط TLS": "TLS only", "🔒 SSH روی TLS": "🔒 SSH over TLS", "فعال‌سازی SSH روی TLS": "Enable SSH over TLS", "پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)": "TLS port(s) for normal accounts (comma-separated)", "پورت(های) TLS اکانت‌های تانل": "TLS port(s) for tunnel accounts", "💾 ذخیره‌ی پورت‌ها": "💾 Save ports", "📜 گواهی فعلی": "📜 Current certificate", "↩️ بازگشت به گواهی self-signed": "↩️ Back to a self-signed certificate", "🌍 دامنه و گواهی (یک‌کلیک)": "🌍 Domain and certificate (one click)", "منبع دامنه": "Domain source", "دامنه‌ی رایگان (خودکار)": "Free domain (automatic)", "دامنه‌ی خودم را دارم": "I have my own domain", "ایمیل (اختیاری؛ برای هشدار انقضا از Let's Encrypt)": "E-mail (optional; Let's Encrypt expiry warnings)", "سرویس دامنه‌ی رایگان": "Free-domain service", "sslip.io — بدون ثبت‌نام": "sslip.io — no sign-up", "nip.io — بدون ثبت‌نام": "nip.io — no sign-up", "DuckDNS — زیردامنه‌ی ثابت (حساب رایگان لازم است)": "DuckDNS — fixed sub-domain (free account needed)", "سرویس wildcard-DNS دیگر (خودت وارد کن)": "Another wildcard-DNS service (enter it yourself)", "نام زیردامنه در DuckDNS": "DuckDNS sub-domain name", "توکن DuckDNS": "DuckDNS token", "پسوند سرویس (مثلاً sslip.io)": "Service suffix (e.g. sslip.io)", "دامنه‌ی شما": "Your domain", "⚡ دریافت دامنه و گواهی": "⚡ Get domain and certificate", "⏳ در حال دریافت...": "⏳ Working...", "⬆️ آپلود گواهی دلخواه (PEM)": "⬆️ Upload your own certificate (PEM)", "دامنه‌ی این گواهی (برای لینک‌ها و SNI)": "Domain of this certificate (used in links and SNI)", "🔒 رفتن به تب TLS و دامنه": "🔒 Go to the TLS & Domain tab", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی و دامنه در تب «TLS و دامنه» مدیریت می‌شود (یک گواهی برای HTTPS پنل و SSH روی TLS)؛ گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد.": "The panel uses HTTPS on this same port (an old http address redirects to https automatically). The certificate and domain are managed in the “TLS & Domain” tab (one certificate for the panel's HTTPS and for SSH over TLS); the default certificate is self-signed and the browser shows a warning.", "خاموش": "Off", "🟢 فعال": "🟢 Active", "🔴 سرویس بالا نیست": "🔴 Service is not running", "دامنه را وارد کن": "Enter the domain", "به گواهی self-signed برگردیم؟ دامنه‌ی فعلی پاک می‌شود.": "Go back to a self-signed certificate? The current domain will be cleared.", "معمولی + TLS": "Normal + TLS", "فقط معمولی": "Normal only", "🔄 تمدید گواهی": "🔄 Renew certificate", "گواهی همین حالا از Let's Encrypt دوباره صادر شود؟ (تمدید خودکار هم هر روز بررسی می‌شود؛ این دکمه برای تمدید فوری است.)": "Re-issue the certificate from Let's Encrypt right now? (Automatic renewal is also checked every day; this button is for an immediate renewal.)"}, ENP=[["ویرایش: {0}", "Edit: {0}"], ["پورت‌های فعال sshd: {0} (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)", "Active sshd ports: {0} (ports defined outside the panel, such as your own main port, are never touched)"], ["دسترس‌پذیری ۲۴ ساعت: {0}٪ · میانگین تأخیر: {1} ms · {2} نمونه قطع", "24 h availability: {0}% · average latency: {1} ms · {2} samples down"], ["بازیابی انجام شد ({0} کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.", "Restore finished ({0} users). The panel restarts in a few seconds; log in again."], ["ارسال نشد: {0}", "Not sent: {0}"], ["قالب «{0}» حذف شود؟", "Delete template “{0}”?"], ["{0} اکانت با پیشوند {1} ساخته شود؟", "Create {0} accounts with prefix {1}?"], ["تانل سالم است. IP خروجی: {0}", "The tunnel is healthy. Exit IP: {0}"], ["تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: {0}", "Tunnel removed. Accounts converted to Direct: {0}"], ["اتصال به {0}:{1} با رمز و نصب کلید", "Connecting to {0}:{1} with the password and installing the key"], ["اتصال SSH برقرار نشد: {0}", "SSH connection failed: {0}"], ["ورود با کلید ناموفق: {0}", "Key login failed: {0}"], ["تداخل پورت روی این سرور رفع شد: {0}", "Port conflicts on this server were fixed: {0}"], ["تانل بالا نیامد: {0}", "The tunnel did not come up: {0}"], ["IP خروجی تانل: {0}", "Tunnel exit IP: {0}"]], HT={"tnNote": "The password is only used to install an SSH key and is not stored; after that the link uses the key.<br>⚠️ If you prefer not to type the server's password into the web page, run this in a terminal on this server:<br><code dir=\"ltr\">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code>", "biNote": "When creating an account the admin has two choices, <bdi dir=\"ltr\"><b>In</b></bdi> and <bdi dir=\"ltr\"><b>Out</b></bdi>: <bdi dir=\"ltr\"><b>In</b></bdi> is which server's IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is which server's IP the user reaches the internet with. All four combinations (<span dir=\"ltr\">1→1</span>, <span dir=\"ltr\">1→2</span>, <span dir=\"ltr\">2→1</span>, <span dir=\"ltr\">2→2</span>) are active and UDPGW (games/calls) works on all of them. No separate mode needs to be configured.", "how": "<bdi dir=\"ltr\"><b>In</b></bdi> is the server whose IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is the server whose IP is seen on the internet. “Server 1” is this server and “Server 2” is the tunnel server.<br>\n    1) When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2”, the traffic goes through the tunnel. This account works on the <b>SSH (OpenSSH)</b> ports and the <b>tunnel Dropbear</b> ports; the normal Dropbear ports are only for accounts whose <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 1”. Ports can be changed in the Settings tab.<br>\n    2) When <bdi dir=\"ltr\"><b>In</b></bdi> is “Server 2”, this server's ports are opened on server 2 and forwarded through the tunnel to this server. Port 22 and any port server 2 itself listens on are never touched, so admin access to both servers and to the panel always stays open. The firewall of server 2 must allow these ports and the real IP of the user is not visible on this server.<br>\n    3) If the tunnel goes down, every path that goes through it is <b>blocked</b> (instead of leaking out through the direct IP). It reconnects automatically.<br>\n    4) UDPGW (games/calls) works on all four combinations. When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2” it goes through the tunnel. The client keeps using <span dir=\"ltr\">127.0.0.1:7300</span>.<br>\n    5) The tunnel runs over SSH (TCP); for better speed keep BBR on for both servers.", "tgNote": "First create a bot in Telegram with @BotFather and paste the token here; then send <span dir=\"ltr\">/start</span> to the bot and press “Find Chat ID”. If Telegram cannot be reached from this server, the panel automatically sends through the tunnel.", "tgCmd": "Bot commands (only from the configured Chat ID): <span dir=\"ltr\">/status /users /online /backup</span>", "tlsNote": "SSH is wrapped inside a TLS connection, for apps or networks that want TLS/SNI.<br>• A “Normal only” account cannot log in on a TLS port, and a “TLS only” account cannot log in on the plain Dropbear ports.<br>• A “TLS only” account is also refused on the OpenSSH ports (such as 22); “Normal only” and “Both” accounts can log in there.<br>• Tunnel accounts have their own TLS port (they exit through the tunnel).<br>• The <span dir=\"ltr\">ssh://</span> link format for TLS is not standardised; if your app does not accept it, enter the address, port and SNI by hand.", "tlsShared": "This same certificate and domain are also used for the panel's own HTTPS; nothing else needs to be set up elsewhere."};
 const FAre=/[؀-ۿ]/, nrm=s=>String(s).replace(/\s+/g," ").trim(), ATTRS=["placeholder","title","aria-label"];
 const PATRE=ENP.map(p=>new RegExp("^"+nrm(p[0]).split(/(\{\d+\})/).map(x=>/^\{\d+\}$/.test(x)?"(.+?)":x.replace(/[.*+?^$()|[\]\\]/g,"\\$&")).join("")+"$","s"));
 function tr(s){
@@ -2847,8 +2933,6 @@ function cxBadge(x){
 }
 function cxHint(en,cx){
   const w=[]; if(cx!=="normal"&&!tlsB.on) w.push(L("⚠️ SSH روی TLS هنوز روشن نیست (تب «TLS و دامنه»)؛ تا آن موقع اکانت «فقط TLS» جایی وارد نمی‌شود.","⚠️ SSH over TLS is not switched on yet (TLS & Domain tab); until then a TLS-only account cannot log in on a Dropbear port."));
-  if(en==="B"&&cx==="tls") w.push(L("⚠️ ورود از سرور ۲ با «فقط TLS» ممکن نیست؛ نوع «معمولی» یا «هر دو» را انتخاب کن.","⚠️ Entry via server 2 is not possible with TLS only; choose Normal or Both."));
-  if(en==="B"&&cx==="both") w.push(L("ℹ️ ورود از سرور ۲ فقط معمولی است (پورت‌های TLS فوروارد نمی‌شوند).","ℹ️ Entry via server 2 is plain only (the TLS ports are not forwarded)."));
   return w.join("<br>");
 }
 function fillSrv(){
@@ -2862,8 +2946,9 @@ function fillPorts(cn,ce){
   const sk=tnCfg.rev_skipped||[];
   const mk=(en,ex,cx)=>{
     const db=(ex==="B"?(pCfg.tdb||[]):(pCfg.db||[]));
-    if(en==="B"){const mp=revMap(), s2=(pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]; return portOpts(s2.map(p=>mp[p]).filter(Boolean),db.map(p=>mp[p]).filter(Boolean),[])}
-    const tl=(cx!=="normal"&&tlsB.on)?(ex==="B"?(tlsB.tports||[]):(tlsB.ports||[])):[], only=cx==="tls"&&tl.length>0;
+    const tl0=(cx!=="normal"&&tlsB.on)?(ex==="B"?(tlsB.tports||[]):(tlsB.ports||[])):[];
+    if(en==="B"){const mp=revMap(), s2=(pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[], tl2=tl0.map(p=>mp[p]).filter(Boolean), only2=cx==="tls"&&tl2.length>0; return portOpts(only2?[]:s2.map(p=>mp[p]).filter(Boolean),only2?[]:db.map(p=>mp[p]).filter(Boolean),tl2)}
+    const tl=tl0, only=cx==="tls"&&tl.length>0;
     return portOpts(only?[]:((pCfg.ssh_all&&pCfg.ssh_all.length)?pCfg.ssh_all:[22]),only?[]:db,tl);
   };
   const n=cn!==undefined?cn:$("npt").value, e=ce!==undefined?ce:$("ept").value;
@@ -2994,9 +3079,11 @@ function copyU(u){
   const exitIp=out?(tnCfg.exit||tnCfg.host||"server 2"):location.hostname;
   let ssh=pCfg.ssh_all||[22], dbl=out?(pCfg.tdb||[]):(pCfg.db||[]);
   if(inB){const mp=revMap(); ssh=((pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[]).map(p=>mp[p]).filter(Boolean); dbl=dbl.map(p=>mp[p]).filter(Boolean)}
-  const cx=x.cx||"both", useTls=cx!=="normal"&&tlsB.on&&!inB;
+  const cx=x.cx||"both"; let tp=(cx!=="normal"&&tlsB.on)?(out?tlsB.tports:tlsB.ports)||[]:[];
+  if(inB){const mp=revMap(); tp=tp.map(p=>mp[p]).filter(Boolean)}
+  const useTls=tp.length>0;
   if(useTls&&cx==="tls"){ssh=[]; dbl=[]}
-  const tlsTxt=useTls?`\nTLS Ports: ${(out?tlsB.tports:tlsB.ports).join(", ")}${tlsB.dom?"\nSNI / TLS Host: "+tlsB.dom:""}`:"";
+  const tlsTxt=useTls?`\nTLS Ports: ${tp.join(", ")}${tlsB.dom?"\nSNI / TLS Host: "+tlsB.dom:""}`:"";
   const t=`Host/IP: ${host}\nIn: ${inB?"Server 2":"Server 1"} | Out: ${out?"Server 2":"Server 1"} (exit IP: ${exitIp})\nSSH Ports: ${ssh.join(", ")||"-"}\nDropbear Ports: ${dbl.join(", ")||"-"}${tlsTxt}\nUser: ${x.u}\nPass: ${x.pw}\nLimit: ${x.lim}\nQuota: ${x.q>0?x.q+" GB":"Unlimited"}\nUDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`;
   copyText(t);
 }
@@ -3009,7 +3096,7 @@ async function loadTun(){
   $("tnBiBox").classList.toggle("hid",!d.conf);
   $("tnPortBox").classList.toggle("hid",!d.conf);
   if(d.conf){
-    const kind=p=>(pCfg.tdb||[]).includes(p)?"Dropbear تانل":((pCfg.db||[]).includes(p)?"Dropbear":"SSH دوم");
+    const kind=p=>(pCfg.tdb||[]).includes(p)?"Dropbear تانل":((pCfg.db||[]).includes(p)?"Dropbear":(((tlsB.ports||[]).concat(tlsB.tports||[])).includes(p)?"TLS":"SSH دوم"));
     const rows=(d.rev_map||[]).map(r=>`<tr><td dir="ltr">${r.a}</td><td>${kind(r.a)}</td><td dir="ltr">${r.b}</td><td>${r.a===r.b?'<span class="bdg ok">هم‌شماره</span>':'<span class="bdg wn">جابه‌جا شد (مشغول بود)</span>'}</td></tr>`)
       .concat((d.rev_skipped||[]).map(p=>`<tr><td dir="ltr">${p}</td><td>${kind(p)}</td><td>—</td><td><span class="bdg er">منتشر نشد</span></td></tr>`)).join("");
     $("tnPorts").innerHTML=`<table><thead><tr><th>پورت سرور ۱</th><th>نوع</th><th>پورت روی سرور ۲</th><th>وضعیت</th></tr></thead><tbody>${rows||'<tr><td colspan="4" style="color:var(--mu)">هنوز پورتی منتشر نشده</td></tr>'}</tbody></table>`;
@@ -3085,9 +3172,10 @@ async function loadTls(init){
   $("tlsStat").innerHTML=!c.on?'<span class="bdg wn">خاموش</span>':(d.up?'<span class="bdg ok">🟢 فعال</span>':'<span class="bdg er">🔴 سرویس بالا نیست</span> <span style="font-size:.75rem;color:var(--mu)" dir="ltr">'+esc(sv.join(", "))+'</span>')
     +(c.on?` <span class="bdg ok" dir="ltr">${esc((c.ports||[]).join(","))}</span> <span class="bdg wn" dir="ltr">${esc((c.tports||[]).join(","))}</span>`:"")
     +(!d.installed.stunnel?` <span class="bdg wn">${L("stunnel نصب نیست؛ با روشن‌کردن خودکار نصب می‌شود","stunnel is not installed; it is installed when you switch TLS on")}</span>`:"");
-  const left=m.days;
-  $("tlsCert").innerHTML=L(`دامنه: <b dir="ltr">${esc(c.domain||"—")}</b><br>گواهی برای: <b dir="ltr">${esc(m.cn||"—")}</b><br>صادرکننده: <span dir="ltr">${esc((m.issuer||"").replace(/^.*CN\s*=\s*/,"")||"—")}</span><br>انقضا: <span dir="ltr">${esc(m.end||"—")}</span>${left!=null?` (${left} روز مانده)`:""}<br>${m.self?'<span class="bdg wn">self-signed</span> برنامه‌ها باید «اجازه به گواهی نامعتبر» داشته باشند':'<span class="bdg ok">معتبر / مورد اعتماد</span>'}`,
-    `Domain: <b dir="ltr">${esc(c.domain||"—")}</b><br>Certificate for: <b dir="ltr">${esc(m.cn||"—")}</b><br>Issuer: <span dir="ltr">${esc((m.issuer||"").replace(/^.*CN\s*=\s*/,"")||"—")}</span><br>Expires: <span dir="ltr">${esc(m.end||"—")}</span>${left!=null?` (${left} days left)`:""}<br>${m.self?'<span class="bdg wn">self-signed</span> apps must allow an untrusted certificate':'<span class="bdg ok">valid / trusted</span>'}`);
+  const left=m.days, canRenew=!m.self&&(c.mode==="own"||c.mode==="free")&&!!c.domain;
+  $("tlsRenewBtn").classList.toggle("hid",!canRenew);
+  $("tlsCert").innerHTML=L(`دامنه: <b dir="ltr">${esc(c.domain||"—")}</b><br>گواهی برای: <b dir="ltr">${esc(m.cn||"—")}</b><br>صادرکننده: <span dir="ltr">${esc((m.issuer||"").replace(/^.*CN\s*=\s*/,"")||"—")}</span><br>انقضا: <span dir="ltr">${esc(m.end||"—")}</span>${left!=null?` <span style="color:${left<15?"var(--wn)":"var(--ok)"}">(${left} روز مانده)</span>`:""}<br>${m.self?'<span class="bdg wn">self-signed</span> برنامه‌ها باید «اجازه به گواهی نامعتبر» داشته باشند':'<span class="bdg ok">معتبر / مورد اعتماد</span>'}`,
+    `Domain: <b dir="ltr">${esc(c.domain||"—")}</b><br>Certificate for: <b dir="ltr">${esc(m.cn||"—")}</b><br>Issuer: <span dir="ltr">${esc((m.issuer||"").replace(/^.*CN\s*=\s*/,"")||"—")}</span><br>Expires: <span dir="ltr">${esc(m.end||"—")}</span>${left!=null?` <span style="color:${left<15?"var(--wn)":"var(--ok)"}">(${left} days left)</span>`:""}<br>${m.self?'<span class="bdg wn">self-signed</span> apps must allow an untrusted certificate':'<span class="bdg ok">valid / trusted</span>'}`);
   const run=!!j.run; $("tlsGo").disabled=run; $("tlsGo").innerText=run?"⏳ در حال دریافت...":"⚡ دریافت دامنه و گواهی";
   if(j.steps.length){
     const ic={run:"⏳",ok:"✅",err:"❌",warn:"⚠️"}, cl={err:"var(--er)",warn:"var(--wn)"};
@@ -3117,6 +3205,12 @@ async function tlsGo(){
   const r=await api("/api/tls/issue","POST",b);
   if(!r.ok){alert(r.msg||"Error");return}
   $("tlsDuckTok").value=""; tlsS._wasRun=true; loadTls(false);
+}
+async function tlsRenew(){
+  if(!confirm("گواهی همین حالا از Let's Encrypt دوباره صادر شود؟ (تمدید خودکار هم هر روز بررسی می‌شود؛ این دکمه برای تمدید فوری است.)")) return;
+  const r=await api("/api/tls/renew","POST",{});
+  if(!r.ok){alert(r.msg||"Error");return}
+  tlsS._wasRun=true; loadTls(false);
 }
 async function tlsSelf(){
   if(!confirm("به گواهی self-signed برگردیم؟ دامنه‌ی فعلی پاک می‌شود.")) return;
