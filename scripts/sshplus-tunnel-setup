@@ -1,0 +1,5 @@
+#!/bin/bash
+# terminal version of the panel's Tunnel tab (the password is typed here instead of going through the panel's plain HTTP)
+# usage: sshplus-tunnel-setup EXIT_SERVER_IP [SSH_PORT] [USER]
+[ -n "$1" ] || { echo "usage: sshplus-tunnel-setup EXIT_SERVER_IP [SSH_PORT=22] [USER=root]"; exit 1; }
+exec python3 /opt/sshplus-panel/app.py --tunnel-setup "$1" "${2:-22}" "${3:-root}"

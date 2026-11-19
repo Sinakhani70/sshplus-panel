@@ -1,0 +1,14 @@
+[Unit]
+Description=SSH Plus Tunnel (link to the exit server)
+After=network-online.target sshplus-tunnel-net.service
+Wants=network-online.target sshplus-tunnel-net.service
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-tunnel.sh
+ExecStopPost=/usr/local/bin/sshplus-tunnel-net down
+Restart=always
+RestartSec=3
+KillMode=control-group
+[Install]
+WantedBy=multi-user.target

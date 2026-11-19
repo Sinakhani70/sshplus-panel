@@ -1,0 +1,13 @@
+[Unit]
+Description=SSH Plus Panel
+After=network.target
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sshplus-panel
+ExecStart=/usr/bin/python3 /opt/sshplus-panel/app.py
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

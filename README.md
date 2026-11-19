@@ -188,6 +188,26 @@ Accounts stay on the system; remove them with `userdel USERNAME`. Make sure you 
 
 On the exit server (only if you did not remove the tunnel in the panel): `systemctl disable --now sshplus-exit; rm -f /usr/local/bin/sshplus-exit.sh /etc/systemd/system/sshplus-exit.service /etc/sshplus-exit.ports /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf`, then reload sshd.
 
+### Development
+
+`install.sh` is what users download, so it stays **one file** — but it is **generated**. Edit the real sources and rebuild:
+
+| Path | What it is |
+|------|------------|
+| `panel/app.py` | panel backend (Python) |
+| `panel/index.html`, `panel/ui.js` | panel UI: markup + CSS, and the JavaScript |
+| `scripts/` | helper scripts installed to `/usr/local/bin` |
+| `systemd/` | service units |
+| `installer/install.sh.in` | installer skeleton (steps, config); each big block is a line `@@INCLUDE path@@` |
+| `tests/` | unit tests (`python3 -m unittest discover -s tests -v`) |
+
+```bash
+./build.sh          # regenerate install.sh from the sources
+./build.sh --check  # fail if install.sh is not up to date (run before every commit)
+```
+
+Do not edit `install.sh` by hand; the next build would overwrite it.
+
 ### Disclaimer
 Use this software only on servers you own or administer, and in accordance with the laws that apply to you. It is provided as-is, without warranty.
 
@@ -376,6 +396,26 @@ rm -f /usr/local/bin/start-dropbear.sh /usr/local/bin/start-badvpn.sh /usr/local
 اکانت‌ها روی سیستم می‌مانند؛ با `userdel USERNAME` پاکشان کن. قبل از حذف `/etc/ssh/sshd_config.d/00-sshplus.conf` مطمئن شو راه دیگری برای ورود به سرور داری (مثلاً پورت ۲۲).
 
 روی سرور خروجی (فقط اگر تانل را در پنل حذف نکردی): `systemctl disable --now sshplus-exit; rm -f /usr/local/bin/sshplus-exit.sh /etc/systemd/system/sshplus-exit.service /etc/sshplus-exit.ports /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf` و بعد sshd را reload کن.
+
+### توسعه
+
+`install.sh` همان فایلی است که کاربران دانلود می‌کنند، پس **تک‌فایل** می‌ماند ولی **ساخته می‌شود**. فایل‌های اصلی را ویرایش کن و دوباره build بگیر:
+
+| مسیر | چیست |
+|------|------|
+| `panel/app.py` | بک‌اند پنل (Python) |
+| `panel/index.html` و `panel/ui.js` | رابط پنل: ساختار و CSS، و جاوااسکریپت |
+| `scripts/` | اسکریپت‌های کمکی که در `/usr/local/bin` نصب می‌شوند |
+| `systemd/` | فایل‌های سرویس |
+| `installer/install.sh.in` | اسکلت نصب‌کننده (مراحل و تنظیمات)؛ هر بلوک بزرگ یک خط `@@INCLUDE path@@` است |
+| `tests/` | تست‌های واحد (`python3 -m unittest discover -s tests -v`) |
+
+```bash
+./build.sh          # ساخت دوباره‌ی install.sh از منابع
+./build.sh --check  # اگر install.sh به‌روز نباشد خطا می‌دهد (قبل از هر commit)
+```
+
+`install.sh` را دستی ویرایش نکن؛ build بعدی آن را بازنویسی می‌کند.
 
 ### سلب مسئولیت
 این نرم‌افزار را فقط روی سرورهایی که مالک یا مدیر آن‌ها هستی و مطابق قوانین کشور خودت استفاده کن. نرم‌افزار «همان‌طور که هست» و بدون هیچ ضمانتی ارائه می‌شود.

@@ -1,0 +1,5 @@
+#!/bin/bash
+trap '' INT QUIT TSTP
+trap 'kill $! 2>/dev/null; exit 0' HUP TERM
+[ -t 1 ] && echo "=== SSH Plus Tunnel Connected ==="
+while true; do sleep 3600 & wait $!; done
