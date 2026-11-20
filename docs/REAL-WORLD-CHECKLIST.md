@@ -29,3 +29,9 @@ If something fails: `journalctl -u sshplus-stunnel -n 50`, `journalctl -u sshplu
 ۵. **نمایش IP.** یک اکانت را از گوشی با TLS وصل کن: ستون «آنلاین» در جدول کاربران باید IP عمومی گوشی را نشان بدهد (نه 127.0.0.1).
 
 اگر چیزی خراب بود: `journalctl -u sshplus-stunnel -n 50` و `journalctl -u sshplus-dropbear-s -n 50` و `journalctl -u sshplus-panel -n 50`.
+
+## Tunnel checks (after installing v1.7.1 and pressing "Update exit server")
+1. On the exit server `iptables -t nat -S SSHPLUS_REV` — every line contains `! -i tun99` and `--dst-type LOCAL`.
+2. On the panel server `curl -sS -m 8 --interface 10.99.0.1 https://api.ipify.org` prints the exit server's IP (HTTPS on :443 must pass through the tunnel).
+3. Speed test with a tunnel account (SSH type, then WireGuard type if UDP is open between the servers).
+4. Known limit: entering via the exit server, all users reach the panel's Dropbear from one source IP (10.99.0.2); Dropbear accepts only 5 *simultaneous unauthenticated* connections per IP, so a burst of more than 5 logins in the same instant (e.g. mass reconnect) is partly refused until clients retry. Logins spaced by >= 50 ms all pass.
