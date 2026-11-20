@@ -34,6 +34,8 @@ apt-get install -y python3 git cmake build-essential dropbear-bin openssh-server
 # SSH over TLS front. Optional here: the panel installs it on demand when TLS is switched on. Its own generic service is not used.
 apt-get install -y stunnel4 >>$LOG 2>&1 || echo "WARN: stunnel4 نصب نشد؛ هنگام روشن‌کردن TLS از پنل نصب می‌شود"
 systemctl disable --now stunnel4 >/dev/null 2>&1 || true
+# WireGuard tunnel type (fast, UDP): the tools are small; the panel installs them on demand if this fails
+apt-get install -y wireguard-tools >>$LOG 2>&1 || echo "WARN: wireguard-tools نصب نشد؛ هنگام انتخاب WireGuard از پنل نصب می‌شود"
 for c in python3 dropbear dropbearkey cmake git sshpass ssh-keygen ip iptables openssl; do
   command -v $c >/dev/null || { echo "FAILED: $c نصب نشد. لاگ: $LOG"; exit 1; }
 done
@@ -213,6 +215,11 @@ cat > /usr/local/bin/start-tunnel.sh <<'EOF'
 @@INCLUDE scripts/start-tunnel.sh@@
 EOF
 chmod 755 /usr/local/bin/start-tunnel.sh
+
+cat > /usr/local/bin/start-wg.sh <<'EOF'
+@@INCLUDE scripts/start-wg.sh@@
+EOF
+chmod 755 /usr/local/bin/start-wg.sh
 
 cat > /usr/local/bin/sshplus-tunnel-setup <<'EOF'
 @@INCLUDE scripts/sshplus-tunnel-setup@@
