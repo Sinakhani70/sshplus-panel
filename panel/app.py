@@ -469,7 +469,8 @@ for e in $(tr ',' ' ' < /etc/sshplus-exit.ports 2>/dev/null); do
   [ "$bp" -ge 1 ] && [ "$bp" -le 65535 ] && [ "$ap" -ge 1 ] && [ "$ap" -le 65535 ] || continue
   # never take over a port this server itself uses (admin SSH on 22, any service already listening)
   if [ "$bp" = 22 ] || ss -ltnH "sport = :$bp" 2>/dev/null | grep -q .; then sk="$sk $bp:$ap"; continue; fi
-  iptables -t nat -A SSHPLUS_REV -p tcp --dport "$bp" -j DNAT --to-destination "10.99.0.1:$ap"
+  # only connections addressed to THIS server (not traffic of tunnel users going out to the internet on the same port, e.g. :443)
+  iptables -t nat -A SSHPLUS_REV ! -i tun99 -m addrtype --dst-type LOCAL -p tcp --dport "$bp" -j DNAT --to-destination "10.99.0.1:$ap"
   iptables -A SSHPLUS_REVF -o tun99 -p tcp --dport "$ap" -j ACCEPT
   ok="$ok $bp:$ap"
 done

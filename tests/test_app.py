@@ -390,6 +390,15 @@ class TlsExtras(unittest.TestCase):
         self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
 
 
+class ExitRevScope(unittest.TestCase):
+    def test_reverse_dnat_only_for_traffic_to_this_server(self):
+        # a DNAT on bare --dport would hijack tunnel users' own outgoing https (:443) and break the internet through the tunnel
+        src = open(os.path.join(os.path.dirname(__file__), "..", "panel", "app.py"), encoding="utf-8").read()
+        line = [l for l in src.splitlines() if "-A SSHPLUS_REV " in l][0]
+        self.assertIn("--dst-type LOCAL", line)
+        self.assertIn("! -i tun99", line)
+
+
 class TunnelDiag(unittest.TestCase):
     def test_systemd_chatter_is_dropped_and_the_real_error_is_kept(self):
         j = """SSHPLUS-TUNNEL: starting ssh -w to root@155.103.69.51:22
