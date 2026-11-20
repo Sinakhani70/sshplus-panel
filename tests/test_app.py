@@ -420,7 +420,11 @@ class TunnelProbe(unittest.TestCase):
         import socket, threading
         self.old = (app.cmd, app.TUN_LOCAL, app.TUN_REMOTE, app.tconf, dict(app._TP))
         self.srv = socket.socket(); self.srv.bind(("127.0.0.1", 0)); self.srv.listen(5); self.port = self.srv.getsockname()[1]
-        threading.Thread(target=lambda: [self.srv.accept() for _ in range(5)], daemon=True).start()
+        def accept_loop():
+            try:
+                for _ in range(5): self.srv.accept()
+            except OSError: pass                                                      # closed by tearDown
+        threading.Thread(target=accept_loop, daemon=True).start()
         app.TUN_LOCAL = "127.0.0.1"; app.TUN_REMOTE = "127.0.0.1"; app.tconf = lambda: {"TUN_PORT": str(self.port)}; app._TP["t"] = 0.0
 
     def tearDown(self):
@@ -442,6 +446,76 @@ class TunnelProbe(unittest.TestCase):
         n = []
         app.cmd = lambda c, *a, **k: (n.append(1) or (0, "time=2 ms", ""))
         app.tun_probe(True); app.tun_probe(); app.tun_probe(); self.assertEqual(len(n), 1)
+
+
+class WireGuardMode(unittest.TestCase):
+    def setUp(self):
+        self.old = {k: getattr(app, k) for k in ("cmd", "_run", "WGPRIV", "WGPUB", "TCONF", "shutil")}
+        self.t = tempfile.mkdtemp(); app.WGPRIV = self.t + "/priv"; app.WGPUB = self.t + "/pub"; app.TCONF = self.t + "/tunnel.conf"
+
+    def tearDown(self):
+        for k, v in self.old.items(): setattr(app, k, v)
+
+    def test_key_pair_is_created_once_and_private(self):
+        calls = []
+        def run(c, inp=None, **k):
+            calls.append(c[1]); return (0, "PRIVKEY" if c[1] == "genkey" else "PUBKEY", "")
+        app._run = run
+        self.assertEqual(app.wg_keys(), ("PUBKEY", ""))
+        self.assertEqual(oct(os.stat(app.WGPRIV).st_mode & 0o777), "0o600")
+        self.assertEqual(app.wg_keys(), ("PUBKEY", "")); self.assertEqual(calls, ["genkey", "pubkey"])        # second call reuses the files
+
+    def test_key_errors_are_reported(self):
+        app._run = lambda c, inp=None, **k: (1, "", "wg: not found")
+        self.assertEqual(app.wg_keys()[0], ""); self.assertIn("not found", app.wg_keys()[1])
+
+    def test_handshake_parsing(self):
+        for out, want in (("PEERKEY\t0", False), ("PEERKEY\t1795169243", True), ("", False)):
+            app.cmd = lambda c, *a, **k: (0, out, ""); self.assertEqual(app.wg_handshake(), want, out)
+        app.cmd = lambda c, *a, **k: (1, "", "No such device"); self.assertFalse(app.wg_handshake())
+
+    def test_local_support_kernel_go_or_none(self):
+        app.cmd = lambda c, *a, **k: (0, "", ""); self.assertEqual(app.wg_local_support(), "kernel")      # `ip link add ... type wireguard` works
+        app.cmd = lambda c, *a, **k: (1, "", "Operation not supported")
+        class SH:
+            @staticmethod
+            def which(n, path=None): return "/usr/bin/wireguard-go" if n == "wireguard-go" else None
+        app.shutil = SH; self.assertIn(app.wg_local_support(), ("go", ""))                                  # go only if /dev/net/tun exists
+        class NO:
+            @staticmethod
+            def which(n, path=None): return None
+        app.shutil = NO; self.assertEqual(app.wg_local_support(), "")
+
+    def test_status_reports_the_mode_and_old_installs_are_ssh(self):
+        self.assertEqual(app.tunnel_status(False)["mode"], "ssh")
+        app.tconf_write({"TUN_HOST": "1.2.3.4", "TUN_MODE": "wg"}); self.assertEqual(app.tunnel_status(False)["mode"], "wg")
+
+    def test_setup_start_passes_a_valid_mode(self):
+        import threading
+        got = []
+        class T:
+            def __init__(s, target=None, args=(), daemon=None): got.append(args)
+            def start(s): pass
+        old = threading.Thread; threading.Thread = T
+        try:
+            for m, want in (("wg", "wg"), ("WG", "wg"), ("ssh", "ssh"), ("junk", "ssh"), (None, "ssh")):
+                app.TS["run"] = False; got.clear()
+                body = {"host": "1.2.3.4", "port": 22, "user": "root", "pw": "x"}
+                if m is not None: body["mode"] = m
+                self.assertEqual(app.tunnel_setup_start(body)[0], 200); self.assertEqual(got[0][-1], want, m)
+        finally:
+            threading.Thread = old; app.TS["run"] = False
+
+    def test_remote_script_has_the_pieces_the_panel_relies_on(self):
+        s = app.REMOTE_WG
+        for needle in ("WG_EXIT_PUB:", "WG_PORT:", "SSHPLUS_WG_OK", "allowed-ips 10.99.0.1/32", "ip addr replace 10.99.0.2/30", "ufw allow", "firewall-cmd"):
+            self.assertIn(needle, s, needle)
+
+    def test_scripts_are_valid_bash(self):
+        import subprocess
+        for f in ("start-wg.sh", "start-tunnel.sh", "sshplus-tunnel-net"):
+            self.assertEqual(subprocess.run(["bash", "-n", os.path.join(ROOT, "scripts", f)]).returncode, 0, f)
+        self.assertIn("TUN_MODE", open(os.path.join(ROOT, "scripts", "start-tunnel.sh")).read())
 
 
 class Translations(unittest.TestCase):
