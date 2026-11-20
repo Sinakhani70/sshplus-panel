@@ -469,7 +469,8 @@ for e in $(tr ',' ' ' < /etc/sshplus-exit.ports 2>/dev/null); do
   [ "$bp" -ge 1 ] && [ "$bp" -le 65535 ] && [ "$ap" -ge 1 ] && [ "$ap" -le 65535 ] || continue
   # never take over a port this server itself uses (admin SSH on 22, any service already listening)
   if [ "$bp" = 22 ] || ss -ltnH "sport = :$bp" 2>/dev/null | grep -q .; then sk="$sk $bp:$ap"; continue; fi
-  iptables -t nat -A SSHPLUS_REV -p tcp --dport "$bp" -j DNAT --to-destination "10.99.0.1:$ap"
+  # only connections addressed to THIS server (not traffic of tunnel users going out to the internet on the same port, e.g. :443)
+  iptables -t nat -A SSHPLUS_REV ! -i tun99 -m addrtype --dst-type LOCAL -p tcp --dport "$bp" -j DNAT --to-destination "10.99.0.1:$ap"
   iptables -A SSHPLUS_REVF -o tun99 -p tcp --dport "$ap" -j ACCEPT
   ok="$ok $bp:$ap"
 done
@@ -504,6 +505,61 @@ echo "FW_B:$FWB"
 echo SSHPLUS_REMOTE_OK
 '''
 
+REMOTE_WG=r'''set -e
+export DEBIAN_FRONTEND=noninteractive
+command -v wg >/dev/null 2>&1 || {
+  command -v apt-get >/dev/null 2>&1 || { echo "wireguard-tools is missing (apt-get not found)"; exit 21; }
+  apt-get update -y -qq >/dev/null 2>&1 || true
+  apt-get install -y -qq wireguard-tools >/dev/null 2>&1 || { echo "cannot install wireguard-tools"; exit 21; }
+}
+ip link del sshplus-wgtest 2>/dev/null || true
+if ip link add sshplus-wgtest type wireguard 2>/dev/null; then ip link del sshplus-wgtest; WGM=kernel
+else
+  command -v wireguard-go >/dev/null 2>&1 || apt-get install -y -qq wireguard-go >/dev/null 2>&1 || true
+  if command -v wireguard-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then WGM=go
+  else echo "this server has no WireGuard support (no kernel module, no wireguard-go / TUN device)"; exit 22; fi
+fi
+umask 077
+mkdir -p /etc/sshplus-wg
+[ -s /etc/sshplus-wg/exit.key ] || wg genkey > /etc/sshplus-wg/exit.key
+PUB=$(wg pubkey < /etc/sshplus-wg/exit.key)
+ip link del tun99 2>/dev/null || true; sleep 0.5
+P=${WG_PORT:-51820}; B=$P
+while ss -lunH "sport = :$P" 2>/dev/null | grep -q . && [ "$P" -lt $((B+20)) ]; do P=$((P+1)); done
+printf 'PEER_PUB=%s\nWG_PORT=%s\nWG_MTU=%s\n' "$PEER_PUB" "$P" "${WG_MTU:-1380}" > /etc/sshplus-wg/exit.conf
+cat > /usr/local/bin/sshplus-exit-wg.sh <<'XEOF'
+#!/bin/bash
+. /etc/sshplus-wg/exit.conf
+ip link del tun99 2>/dev/null
+if ! ip link add tun99 type wireguard 2>/dev/null; then wireguard-go tun99 >/dev/null 2>&1; sleep 1; fi
+wg set tun99 private-key /etc/sshplus-wg/exit.key listen-port "$WG_PORT" peer "$PEER_PUB" allowed-ips 10.99.0.1/32 || exit 1
+ip addr replace 10.99.0.2/30 dev tun99
+ip link set tun99 mtu "$WG_MTU" up
+sysctl -qw net.ipv4.ip_forward=1
+XEOF
+chmod 755 /usr/local/bin/sshplus-exit-wg.sh
+cat > /etc/systemd/system/sshplus-exit-wg.service <<'XEOF'
+[Unit]
+Description=SSH Plus exit-server WireGuard link
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/sshplus-exit-wg.sh
+ExecStop=/bin/sh -c 'ip link del tun99'
+[Install]
+WantedBy=multi-user.target
+XEOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable sshplus-exit-wg.service >/dev/null 2>&1 || true
+/usr/local/bin/sshplus-exit-wg.sh
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then ufw allow "$P/udp" >/dev/null 2>&1
+elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then firewall-cmd --permanent --add-port="$P/udp" >/dev/null 2>&1; firewall-cmd --add-port="$P/udp" >/dev/null 2>&1; fi
+echo "WG_EXIT_PUB:$PUB"; echo "WG_PORT:$P"; echo "WG_MODE:$WGM"
+echo SSHPLUS_WG_OK
+'''
+
 def tconf():
   d={}
   try:
@@ -525,7 +581,7 @@ def tunnel_status(full=False):
   c=tconf(); conf=bool(c.get("TUN_HOST"))
   svc=conf and cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0
   up=bool(svc) and cmd(["ip","link","show",TUN_DEV])[0]==0
-  r={"conf":conf,"host":c.get("TUN_HOST",""),"port":to_port(c.get("TUN_PORT",22)) or 22,"user":c.get("TUN_USER",""),
+  r={"conf":conf,"mode":c.get("TUN_MODE","ssh"),"host":c.get("TUN_HOST",""),"port":to_port(c.get("TUN_PORT",22)) or 22,"user":c.get("TUN_USER",""),
      "exit":c.get("EXIT_IP",""),"since":int(c.get("SINCE","0") or 0),"svc":bool(svc),"up":up,
      "route":"both","rev_ports":[int(x) for x in c.get("REV_PORTS","").split(",") if x.isdigit()],
      "rev_skipped":[int(x) for x in c.get("REV_SKIPPED","").split(",") if x.isdigit()],
@@ -591,6 +647,28 @@ def tun_probe(force=False):
     except Exception: pass
   _TP["t"]=time.time(); _TP["v"]=v; return v
 
+WGPRIV="/etc/SSHPlus/wg_private"; WGPUB="/etc/SSHPlus/wg_public"
+def wg_local_support():
+  # "kernel" (module in the kernel), "go" (userspace wireguard-go on /dev/net/tun) or "" (not possible here)
+  if cmd(["ip","link","add","sshplus-wgtest","type","wireguard"])[0]==0:
+    cmd(["ip","link","del","sshplus-wgtest"]); return "kernel"
+  return "go" if shutil.which("wireguard-go",path=ENV["PATH"]) and os.path.exists("/dev/net/tun") else ""
+
+def wg_keys():
+  # this server's WireGuard key pair (created once); returns (public_key, error)
+  if not (os.path.exists(WGPRIV) and os.path.exists(WGPUB)):
+    rc,priv,er=_run(["wg","genkey"])
+    if rc!=0 or not priv: return "",er or "wg genkey failed"
+    rc,pub,er=_run(["wg","pubkey"],inp=priv+"\n")
+    if rc!=0 or not pub: return "",er or "wg pubkey failed"
+    for f,v in ((WGPRIV,priv),(WGPUB,pub)):
+      fd=os.open(f,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.write(fd,(v+"\n").encode()); os.close(fd)
+  return open(WGPUB).read().strip(),""
+
+def wg_handshake():
+  rc,o,_=cmd(["wg","show",TUN_DEV,"latest-handshakes"])
+  return rc==0 and any(x.isdigit() and int(x)>0 for x in o.split())
+
 def tun_local_check():
   # can this server open /dev/net/tun? returns "" or the reason
   try:
@@ -621,8 +699,9 @@ def tunnel_rollback():
     except OSError: pass
   cmd([TNET,"down"])
 
-def tunnel_setup_run(host,port,user,pw):
+def tunnel_setup_run(host,port,user,pw,mode="ssh"):
   with TSL: TS["run"]=True; TS["steps"]=[]; TS["ok"]=None
+  wg=(mode=="wg")
   tgt=f"{user}@{host}"; ctx={}
   old_route="both"
   def S(m,fn):
@@ -636,7 +715,14 @@ def tunnel_setup_run(host,port,user,pw):
     if [c for c in need if not shutil.which(c,path=ENV["PATH"])]:
       _run(["apt-get","install","-y","sshpass","openssh-client","iproute2","iptables","curl","iputils-ping"],t=300)
     miss=[c for c in need if not shutil.which(c,path=ENV["PATH"])]
-    return (False,"missing: "+", ".join(miss)) if miss else (True,"")
+    if miss: return False,"missing: "+", ".join(miss)
+    if wg:
+      if not shutil.which("wg",path=ENV["PATH"]): _run(["apt-get","install","-y","wireguard-tools"],t=300)
+      if not shutil.which("wg",path=ENV["PATH"]): return False,"wireguard-tools could not be installed (apt-get install wireguard-tools)"
+      if not wg_local_support():
+        _run(["apt-get","install","-y","wireguard-go"],t=300)
+        if not wg_local_support(): return False,"this server cannot create a WireGuard interface (no kernel module and no wireguard-go / TUN). Use the SSH tunnel type instead."
+    return True,""
   def f_key():
     if not os.path.exists(TKEY):
       rc,_,er=_run(["ssh-keygen","-q","-t","ed25519","-N","","-f",TKEY,"-C","sshplus-tunnel"])
@@ -658,6 +744,7 @@ def tunnel_setup_run(host,port,user,pw):
     return (True,"") if rc==0 and o.endswith("ok") else (False,"ورود با کلید ناموفق: "+(er or o)[-250:])
   def f_remote():
     fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[])))   # this server first
+    if not wg: _run(["ssh"]+_ssh_o(port)+[tgt,"systemctl disable --now sshplus-exit-wg.service >/dev/null 2>&1; ip link show tun99 2>/dev/null | grep -q . && [ -f /etc/sshplus-wg/exit.conf ] && ip link del tun99; true"],t=40)
     mp=rev_map_calc(rev_ports(),remote_listeners(host,port,user))
     ent=",".join("%d:%d"%(b,a) for a,b in sorted(mp.items()))
     rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"bash -s"],inp="export REV_PORTS=%s\n"%ent+REMOTE_SCRIPT,t=400)
@@ -671,11 +758,25 @@ def tunnel_setup_run(host,port,user,pw):
       elif l.startswith("REV_SKIPPED:"): ctx["sk"]=[t.partition(":")[2] for t in l.split(":",1)[1].split()]
     if fixed: return True,"تداخل پورت روی این سرور رفع شد: "+", ".join("%d←%d"%(c["from"],c["to"]) for c in fixed)
     return True,"PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد"
+  def f_wg():
+    pub,er=wg_keys()
+    if er: return False,"WireGuard key: "+er
+    env="export WG_PORT=51820 PEER_PUB=%s WG_MTU=1380\n"%pub
+    rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"bash -s"],inp=env+REMOTE_WG,t=300)
+    if rc!=0 or "SSHPLUS_WG_OK" not in o: return False,(o.splitlines()[-1:] or [er or "failed"])[0][-250:]
+    for l in o.splitlines():
+      if l.startswith("WG_EXIT_PUB:"): ctx["wgpub"]=l.split(":",1)[1].strip()
+      elif l.startswith("WG_PORT:"): ctx["wgport"]=l.split(":",1)[1].strip()
+      elif l.startswith("WG_MODE:"): ctx["wgmode"]=l.split(":",1)[1].strip()
+    if not ctx.get("wgpub") or not ctx.get("wgport","").isdigit(): return False,"the exit server did not report its WireGuard key / port"
+    return True,"WireGuard (%s) UDP %s"%(ctx.get("wgmode","?"),ctx["wgport"])
   def f_local():
     tn=tun_local_check()
     if tn: return False,"این سرور نمی‌تواند /dev/net/tun را باز کند: %s (روی OpenVZ/LXC در پنل VPS گزینه‌ی TUN/TAP را روشن کن)"%tn
     tconf_write({"TUN_HOST":host,"TUN_PORT":port,"TUN_USER":user,"TUN_DEV":TUN_DEV,"TUN_ID":TUN_ID,
                  "TUN_LOCAL":TUN_LOCAL,"TUN_REMOTE":TUN_REMOTE,"SINCE":int(time.time()),"ROUTE":old_route,
+                 "TUN_MODE":"wg" if wg else "ssh","TUN_MTU":1380 if wg else 1400,
+                 **({"WG_PORT":ctx["wgport"],"WG_EXIT_PUB":ctx["wgpub"]} if wg else {}),
                  "REV_PORTS":",".join(map(str,sorted(ctx.get("okm",{})))),
                  "REV_MAP":",".join("%d:%d"%(a,b) for a,b in sorted(ctx.get("okm",{}).items())),
                  "REV_SKIPPED":",".join(ctx.get("sk",[]))})
@@ -683,6 +784,14 @@ def tunnel_setup_run(host,port,user,pw):
     cmd(["systemctl","enable","sshplus-tunnel"]); cmd(["systemctl","restart","sshplus-tunnel"],30)
     return True,""
   def f_wait():
+    if wg:
+      for _ in range(45):
+        if cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0 and wg_handshake(): break
+        time.sleep(1)
+      else:
+        _,j,_=cmd(["journalctl","-u","sshplus-tunnel","-n","40","--no-pager","-o","cat"],10); txt,_h=tun_diag(j)
+        sh=cmd(["wg","show",TUN_DEV])[1].replace("\n"," | ")[:260]
+        return False,"WireGuard: no handshake with the exit server. UDP port %s is probably blocked (provider firewall / security group / ufw): open UDP %s on the exit server, or choose the SSH tunnel type. / %s\n%s"%(ctx.get("wgport"),ctx.get("wgport"),sh,txt[-200:])
     for _ in range(40):
       if cmd(["systemctl","is-active","sshplus-tunnel"])[0]==0 and \
          tun_probe(True)[0]:
@@ -701,13 +810,19 @@ def tunnel_setup_run(host,port,user,pw):
     return False,("تانل بالا نیامد: "+(h+"\n" if h else "")+(extra+"\n" if extra else "")+txt[-300:])
   def f_exit():
     ip=tun_exit_ip()
-    if not ip: return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)"
+    if not ip:
+      # the link works but nothing reaches the internet through it: say where it stops (DNS? routing here? forwarding / NAT on the exit server?)
+      cu=cmd(["curl","-sS","-m","8","--interface",TUN_LOCAL,"-o","/dev/null","-w","%{http_code}","http://1.1.1.1/"],12)
+      byip="HTTP "+cu[1] if cu[0]==0 else (cu[2] or "no answer")[-90:]
+      rg=cmd(["ip","-4","route","get","1.1.1.1","from",TUN_LOCAL])[1].replace("\n"," ")[:110]
+      rem=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ip_forward=$(sysctl -n net.ipv4.ip_forward); iptables -t nat -S POSTROUTING 2>&1 | head -3; iptables -S FORWARD 2>&1 | head -3; ip -4 route show default | head -1"],t=30)[1].replace("\n"," / ")[:330]
+      return "warn","تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟) / the link is up but the internet is not reachable through it. direct-IP test: %s | route here: %s | exit server: %s"%(byip,rg,rem)
     c=tconf(); c["EXIT_IP"]=ip; tconf_write(c)
     return True,"IP خروجی تانل: "+ip
   try:
     steps=[("بررسی ابزارهای لازم",f_tools),("ساخت کلید SSH مخصوص تانل",f_key),
            (f"اتصال به {host}:{port} با رمز و نصب کلید",f_login),("تست ورود با کلید",f_verify),
-           ("آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)",f_remote)]
+           ("آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)",f_remote)]+([("آماده‌سازی WireGuard روی سرور مقصد",f_wg)] if wg else [])
     ok=True
     for m,f in steps:
       if not S(m,f): ok=False; break
@@ -830,6 +945,7 @@ def tunnel_params(d):
 def tunnel_setup_start(d):
   p,err=tunnel_params(d)
   if err: return err
+  p=p+(("wg" if str(d.get("mode","")).lower()=="wg" else "ssh"),)
   with TSL:
     if TS["run"]: return 409,{"ok":0,"msg":"Setup is already running"}
     TS["run"]=True; TS["steps"]=[]; TS["ok"]=None
@@ -854,6 +970,8 @@ def tunnel_remove():
   if tconf().get("TUN_HOST"):
     try: tunnel_push({})                # take the forwarded ports back on the exit server
     except Exception: pass
+    if tconf().get("TUN_MODE")=="wg":
+      c0=tconf(); _run(["ssh"]+_ssh_o(to_port(c0.get("TUN_PORT",22)) or 22)+[c0.get("TUN_USER","root")+"@"+c0.get("TUN_HOST",""),"systemctl disable --now sshplus-exit-wg.service >/dev/null 2>&1; ip link del tun99 2>/dev/null; rm -rf /etc/sshplus-wg /usr/local/bin/sshplus-exit-wg.sh /etc/systemd/system/sshplus-exit-wg.service; systemctl daemon-reload >/dev/null 2>&1; true"],t=40)
   _,io=on_map(True); n=0
   for u,(_,sh) in passwd_map().items():
     if is_tun(sh):                      # keep these accounts alive as direct accounts (same connection type)
@@ -1390,7 +1508,7 @@ def cli_cert_renewed(lineage):
 
 # ---- 2) encrypted backup / restore
 BK_MAGIC=b"CKBK1"
-BK_FILES=[CFG,PORTS,BV,META,TCONF,TKEY,TKEY+".pub",TKH,SECRETK,DB,TGC,TPL,HIST,CERT,CKEY,TLSC]
+BK_FILES=[CFG,PORTS,BV,META,TCONF,TKEY,TKEY+".pub",TKH,SECRETK,DB,TGC,TPL,HIST,CERT,CKEY,TLSC,WGPRIV,WGPUB]
 
 def bk_key(pw,salt): return base64.urlsafe_b64encode(hashlib.pbkdf2_hmac("sha256",pw.encode(),salt,200000,32))
 
@@ -1928,18 +2046,18 @@ class H(BaseHTTPRequestHandler):
       try: s.js({"ok":0,"msg":str(e)[:100]},400)
       except Exception: pass
 
-def cli_tunnel_setup(host,port,user):
+def cli_tunnel_setup(host,port,user,mode="ssh"):
   p,err=tunnel_params({"host":host,"port":port,"user":user,"pw":"x"})
   if err: print(err[1]["msg"]); return 1
   pw=getpass.getpass(f"Password of {user}@{host}: ")
   if not pw: print("Password required"); return 1
   CLI[0]=True; print(f"Setting up the tunnel to {host}:{p[1]} ...")
-  ok=tunnel_setup_run(host,p[1],user,pw)
+  ok=tunnel_setup_run(host,p[1],user,pw,"wg" if mode=="wg" else "ssh")
   print("Tunnel is UP" if ok else "FAILED (nothing was changed for your users)")
   return 0 if ok else 1
 
 if __name__=="__main__":
-  if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4]))
+  if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5] if len(sys.argv)>5 else "ssh"))
   if len(sys.argv)>=3 and sys.argv[1]=="--cert-renewed": sys.exit(cli_cert_renewed(sys.argv[2]))
   open(DB,"a").close()
   try: migrate_secrets()

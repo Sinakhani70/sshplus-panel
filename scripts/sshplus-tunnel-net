@@ -53,7 +53,7 @@ mark() {
 }
 up() {
   ip addr replace "$TUN_LOCAL/30" dev "$TUN_DEV"
-  ip link set "$TUN_DEV" mtu 1400 up
+  ip link set "$TUN_DEV" mtu "${TUN_MTU:-1400}" up
   sysctl -qw "net.ipv4.conf.$TUN_DEV.rp_filter=0" 2>/dev/null
   ip route replace default dev "$TUN_DEV" table $TBL metric 1
 }
