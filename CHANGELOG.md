@@ -2,6 +2,7 @@
 
 ## Unreleased
 ### Added
+- **"Update exit server" button** (Tunnel tab): rewrites the exit server's script and rules with the panel's current version without removing the tunnel (the exit side was only written at setup, so exit-side fixes needed a re-install). Keeps the current routing mode.
 - **Tunnel type: WireGuard (fast, UDP) or SSH (compatible).** The `ssh -w` tunnel carries TCP inside a TCP connection, which becomes very slow on long or lossy routes. The new WireGuard type uses the same device name and addresses (`tun99`, `10.99.0.1/.2`), so routing, UDPGW, reverse entry and the kill-switch are unchanged; MTU 1380; keys in `/etc/SSHPlus/wg_private|wg_public` (included in backups); the exit server gets `sshplus-exit-wg` (kernel WireGuard, `wireguard-go` fallback; UDP port 51820+ opened in ufw/firewalld). A handshake watchdog restarts a dead link and setup says clearly when UDP seems blocked. Choose the type in the Tunnel tab; switching back to SSH is one click. UDP between the two servers must be allowed.
 - Better tunnel diagnostics: ICMP-then-TCP health probe (many exit servers drop ping), `/dev/net/tun` pre-check, clear `SSHPLUS-TUNNEL` messages and hints for the usual failures, no restart loop when `tunnel.conf` is missing.
 ### Fixed

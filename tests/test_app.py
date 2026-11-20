@@ -390,6 +390,13 @@ class TlsExtras(unittest.TestCase):
         self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
 
 
+class ExitUpdate(unittest.TestCase):
+    def test_needs_a_tunnel_and_keeps_route_mode(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "panel", "app.py"), encoding="utf-8").read()
+        self.assertIn('"/api/tunnel/exit-update"', src)
+        self.assertIn('tunnel_route_apply("forward" if c.get("ROUTE")=="forward" else "both")', src)
+
+
 class ExitRevScope(unittest.TestCase):
     def test_reverse_dnat_only_for_traffic_to_this_server(self):
         # a DNAT on bare --dport would hijack tunnel users' own outgoing https (:443) and break the internet through the tunnel
