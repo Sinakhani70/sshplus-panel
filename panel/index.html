@@ -180,6 +180,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
         <div style="flex:1"><label>کاربر (باید root باشد)</label><input id="tnU" value="root" autocapitalize="none"></div>
       </div>
       <label>رمز SSH سرور جدید</label><input id="tnW" type="password" autocomplete="off" autocapitalize="none">
+      <label>نوع تانل</label><select id="tnMode" onchange="tnModeUi()"><option value="wg">WireGuard — سریع (UDP، پیشنهادی)</option><option value="ssh">SSH — سازگار (TCP، کندتر)</option></select>
+      <div id="tnModeNote" style="font-size:.76rem;color:var(--mu);line-height:1.8;margin:-.3rem 0 .7rem"></div>
       <button id="tnGo" class="btn" style="width:100%" onclick="tunSetup()">⚡ نصب و برقراری تانل</button>
       <div data-th="tnNote" style="font-size:.75rem;color:var(--mu);margin-top:.6rem;line-height:1.7">رمز فقط برای نصب کلید SSH استفاده می‌شود و ذخیره نمی‌شود؛ بعد از آن ارتباط با کلید است.<br>
       ⚠️ اگر نمی‌خواهی رمز سرور را در صفحه‌ی وب تایپ کنی، در ترمینال همین سرور بزن:<br><code dir="ltr">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code></div>
