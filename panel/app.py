@@ -922,6 +922,14 @@ def tunnel_route_apply(mode):
   c["REV_MAP"]=",".join("%d:%d"%(a,b) for a,b in sorted(okm.items())); c["REV_SKIPPED"]=",".join(map(str,sk)); tconf_write(c)
   return 200,{"ok":1,"map":[{"a":a,"b":b} for a,b in sorted(okm.items())],"skipped":sk,"fw_b":fw}
 
+def tunnel_exit_update():
+  # rewrites the exit server's scripts/rules from this panel's current version (no re-install, the tunnel and its settings stay) - the
+  # exit side is only written at setup, so a panel update that changes it needs this
+  c=tconf()
+  if not c.get("TUN_HOST"): return 400,{"ok":0,"msg":"Tunnel is not set up"}
+  if TS["run"]: return 409,{"ok":0,"msg":"Setup is running"}
+  return tunnel_route_apply("forward" if c.get("ROUTE")=="forward" else "both")
+
 def ports_sync():
   # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
   rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
@@ -2028,6 +2036,7 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/tunnel/setup": c,r=tunnel_setup_start(d); s.js(r,c)
       elif p=="/api/tunnel/route": c,r=tunnel_route_apply(str(d.get("mode",""))); s.js(r,c)
       elif p=="/api/tunnel/ports": c,r=ports_sync(); s.js(r,c)
+      elif p=="/api/tunnel/exit-update": c,r=tunnel_exit_update(); s.js(r,c)
       elif p=="/api/tunnel/restart": c,r=tunnel_restart(); s.js(r,c)
       elif p=="/api/tunnel/test": c,r=tunnel_test(); s.js(r,c)
       elif p=="/api/tunnel/remove": c,r=tunnel_remove(); s.js(r,c)
