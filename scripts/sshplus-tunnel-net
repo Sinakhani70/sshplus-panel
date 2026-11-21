@@ -30,9 +30,7 @@ base() {
   # the tunnel UDPGW gets its own conntrack zone: the kernel keeps the source address chosen before the policy re-route, so a tunnel flow
   # with the same 5-tuple as a live direct flow would match the direct flow's NAT-less conntrack entry, skip the MASQUERADE and leave
   # the tunnel with this server's own source address (datagram lost at the exit server). Best effort: without xt_CT nothing changes.
-  iptables -t raw -N SSHPLUS_CTZ 2>/dev/null; iptables -t raw -N SSHPLUS_CTZR 2>/dev/null
-  ipt raw OUTPUT -j SSHPLUS_CTZ 2>/dev/null; ipt raw PREROUTING -j SSHPLUS_CTZR 2>/dev/null
-  ipt raw SSHPLUS_CTZR -i "$TUN_DEV" -p udp -j CT --zone-reply $CTZ 2>/dev/null
+  iptables -t raw -N SSHPLUS_CTZ 2>/dev/null; ipt raw OUTPUT -j SSHPLUS_CTZ 2>/dev/null
   if [ "$V6" = 1 ]; then
     ip -6 route replace unreachable default table $TBL metric 9999
     ip -6 rule show | grep -q "fwmark $MARK lookup $TBL" || ip -6 rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
@@ -109,7 +107,6 @@ clean() {
     $T -t mangle -D OUTPUT -j SSHPLUS_TUN 2>/dev/null; $T -t mangle -F SSHPLUS_TUN 2>/dev/null; $T -t mangle -X SSHPLUS_TUN 2>/dev/null
   done
   iptables -t raw -D OUTPUT -j SSHPLUS_CTZ 2>/dev/null; iptables -t raw -F SSHPLUS_CTZ 2>/dev/null; iptables -t raw -X SSHPLUS_CTZ 2>/dev/null
-  iptables -t raw -D PREROUTING -j SSHPLUS_CTZR 2>/dev/null; iptables -t raw -F SSHPLUS_CTZR 2>/dev/null; iptables -t raw -X SSHPLUS_CTZR 2>/dev/null
   local c
   for c in SSHPLUS_UDPGW_U SSHPLUS_UDPGW_C; do
     iptables -t nat -D OUTPUT -j $c 2>/dev/null; iptables -t nat -F $c 2>/dev/null; iptables -t nat -X $c 2>/dev/null
