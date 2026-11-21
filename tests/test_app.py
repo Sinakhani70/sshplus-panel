@@ -5,7 +5,7 @@ run:  python3 -m unittest discover -s tests -v
 import importlib.util
 import json
 import os
-import sys
+import re
 import tempfile
 import unittest
 
@@ -399,11 +399,22 @@ class ExitUpdate(unittest.TestCase):
 
 class ExitRevScope(unittest.TestCase):
     def test_reverse_dnat_only_for_traffic_to_this_server(self):
-        # a DNAT on bare --dport would hijack tunnel users' own outgoing https (:443) and break the internet through the tunnel
-        src = open(os.path.join(os.path.dirname(__file__), "..", "panel", "app.py"), encoding="utf-8").read()
-        line = [l for l in src.splitlines() if "-A SSHPLUS_REV " in l][0]
-        self.assertIn("--dst-type LOCAL", line)
-        self.assertIn("! -i tun99", line)
+        # runs the real exit script (iptables/ss/sysctl stubbed): a DNAT on bare --dport would hijack tunnel users' own outgoing
+        # https (:443, the SSH-TLS port) and break the internet through the tunnel
+        import subprocess
+        m = re.search(r"cat > /usr/local/bin/sshplus-exit.sh <<'XEOF'\n(.*?)\nXEOF", app.REMOTE_SCRIPT, re.S)
+        self.assertTrue(m)
+        with tempfile.TemporaryDirectory() as d:
+            for n, body in (("iptables", 'echo "$@" >> %s/log; case " $* " in *" -C "*) exit 1;; esac' % d), ("ss", "exit 0"), ("sysctl", "exit 0")):
+                f = os.path.join(d, n); open(f, "w").write("#!/bin/sh\n" + body + "\n"); os.chmod(f, 0o755)
+            ports = os.path.join(d, "ports"); open(ports, "w").write("443,8443:18443\n")
+            script = os.path.join(d, "exit.sh"); open(script, "w").write(m.group(1).replace("/etc/sshplus-exit.ports", ports))
+            r = subprocess.run(["bash", script], env={"PATH": d + ":/usr/bin:/bin"}, capture_output=True, text=True)
+            self.assertIn("REV_OK:443:443 8443:18443", r.stdout)
+            dnat = [l for l in open(os.path.join(d, "log")).read().splitlines() if "DNAT" in l]
+            self.assertEqual(len(dnat), 2)
+            for l in dnat:
+                self.assertIn("! -i tun99", l); self.assertIn("--dst-type LOCAL", l)
 
 
 class TunnelDiag(unittest.TestCase):

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.7.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.7.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.7.0"
+VERSION="1.7.1"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -276,7 +276,7 @@ CGS="$CG_DBS system.slice/badvpn-t.service"
 UDP_PORT=7300
 [ -f /etc/SSHPlus/badvpn.conf ] && . /etc/SSHPlus/badvpn.conf
 TUDP=$((UDP_PORT+1))
-TUN_DEV=tun99; TUN_LOCAL=10.99.0.1
+TUN_DEV=tun99; TUN_LOCAL=10.99.0.1; CTZ=100
 [ -f /etc/SSHPlus/tunnel.conf ] && . /etc/SSHPlus/tunnel.conf
 V6=0; [ -s /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1 && V6=1
 ipt() { local t=$1 c=$2; shift 2; iptables -t "$t" -C "$c" "$@" 2>/dev/null || iptables -t "$t" -A "$c" "$@"; }
@@ -293,6 +293,10 @@ base() {
   ipt nat OUTPUT -j SSHPLUS_UDPGW_U
   ipt nat OUTPUT -j SSHPLUS_UDPGW_C
   ipt nat POSTROUTING -o "$TUN_DEV" -j MASQUERADE
+  # the tunnel UDPGW gets its own conntrack zone: the kernel keeps the source address chosen before the policy re-route, so a tunnel flow
+  # with the same 5-tuple as a live direct flow would match the direct flow's NAT-less conntrack entry, skip the MASQUERADE and leave
+  # the tunnel with this server's own source address (datagram lost at the exit server). Best effort: without xt_CT nothing changes.
+  iptables -t raw -N SSHPLUS_CTZ 2>/dev/null; ipt raw OUTPUT -j SSHPLUS_CTZ 2>/dev/null
   if [ "$V6" = 1 ]; then
     ip -6 route replace unreachable default table $TBL metric 9999
     ip -6 rule show | grep -q "fwmark $MARK lookup $TBL" || ip -6 rule add fwmark $MARK lookup $TBL priority $PRIO_MARK
@@ -306,6 +310,8 @@ mark() {
   iptables -t nat -N SSHPLUS_UDPGW_C 2>/dev/null; iptables -t nat -F SSHPLUS_UDPGW_C
   if [ "$V6" = 1 ]; then ip6tables -t mangle -N SSHPLUS_TUN 2>/dev/null; ip6tables -t mangle -F SSHPLUS_TUN; fi
   local cg
+  iptables -t raw -N SSHPLUS_CTZ 2>/dev/null; iptables -t raw -F SSHPLUS_CTZ 2>/dev/null
+  cgdir system.slice/badvpn-t.service && iptables -t raw -A SSHPLUS_CTZ -p udp -m cgroup --path system.slice/badvpn-t.service -j CT --zone-orig $CTZ 2>/dev/null
   for cg in $CGS; do
     cgdir "$cg" || continue
     iptables -t mangle -A SSHPLUS_TUN -m cgroup --path "$cg" -j MARK --set-xmark $MARK/0xffffffff || return 1
@@ -366,6 +372,7 @@ clean() {
     command -v $T >/dev/null 2>&1 || continue
     $T -t mangle -D OUTPUT -j SSHPLUS_TUN 2>/dev/null; $T -t mangle -F SSHPLUS_TUN 2>/dev/null; $T -t mangle -X SSHPLUS_TUN 2>/dev/null
   done
+  iptables -t raw -D OUTPUT -j SSHPLUS_CTZ 2>/dev/null; iptables -t raw -F SSHPLUS_CTZ 2>/dev/null; iptables -t raw -X SSHPLUS_CTZ 2>/dev/null
   local c
   for c in SSHPLUS_UDPGW_U SSHPLUS_UDPGW_C; do
     iptables -t nat -D OUTPUT -j $c 2>/dev/null; iptables -t nat -F $c 2>/dev/null; iptables -t nat -X $c 2>/dev/null
