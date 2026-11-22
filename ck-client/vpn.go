@@ -21,6 +21,8 @@ type vpnHandler struct {
 	t     *Tunnel
 	useGW bool
 	logf  func(string, ...any)
+
+	okTCP, badTCP, udpN atomic.Int64
 }
 
 func addrString(a tcpip.Address) netip.Addr {
