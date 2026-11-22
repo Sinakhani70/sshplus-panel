@@ -17,7 +17,8 @@ Portable use also works: just run `ck-client.exe`.
 ## Use
 1. VPN mode needs `wintun.dll`: the app downloads the official build (SHA-256 checked) on first connect; if that fails, get the amd64 DLL from <https://www.wintun.net> and put it next to `ck-client.exe`.
 2. Run `ck-client.exe` (Windows asks for Administrator – needed to create the adapter and routes).
-3. Add a profile: server, SSH port, user/password, keep **UDPGW** on with `127.0.0.1:7300` (the panel default), press Connect.
+3. **Fastest:** in the CK.VPN panel copy an account's link (🔗 / *SSH link*, a list of links, or the *subscription link* `https://HOST:2053/s/<token>`), then press **Import** in CK Client – the profile (server, port, user, password, TLS/SNI) is created automatically. Importing the same account again just updates its password.
+   Or add a profile by hand: server, SSH port, user/password, keep **UDPGW** on with `127.0.0.1:7300` (the panel default), press Connect.
 
 Closing the window while connected hides it to the tray (right-click the tray icon → Exit to quit); exiting restores routes/proxy settings.
 

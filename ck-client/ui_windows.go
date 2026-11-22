@@ -241,11 +241,16 @@ func (g *gui) build() error {
 		fn func()
 	}{
 		{"New", cCard, cText, func() { g.edit(nil) }},
+		{"Import", cCard, cPrim, g.importClipboard},
 		{"Edit", cCard, cText, func() { g.edit(g.selected()) }},
 		{"Delete", cCard, cErr, g.deleteSelected},
 	} {
 		fb := newFlatButton(row, b.t, b.bg, b.fg, small, b.fn)
-		fb.SetMinMaxSize(walk.Size{Width: 62, Height: 30}, walk.Size{Width: 62, Height: 30})
+		w := 58
+		if b.t == "Import" {
+			w = 68
+		}
+		fb.SetMinMaxSize(walk.Size{Width: w, Height: 30}, walk.Size{Width: w, Height: 30})
 	}
 	g.reloadProfiles("")
 
@@ -324,6 +329,35 @@ func (g *gui) reloadProfiles(sel string) {
 	if len(names) > 0 {
 		g.cmb.SetCurrentIndex(idx)
 	}
+}
+
+// importClipboard creates profiles from a link copied in the CK.VPN panel
+// (ssh:// link, list of links, or the subscription URL).
+func (g *gui) importClipboard() {
+	text, err := walk.Clipboard().Text()
+	if err != nil || strings.TrimSpace(text) == "" {
+		walk.MsgBox(g.mw, appName, "The clipboard is empty.\r\nIn the panel copy an account link (SSH link / subscription link), then press Import.", walk.MsgBoxIconInformation)
+		return
+	}
+	go func() {
+		profs, err := ImportFromText(text)
+		g.mw.Synchronize(func() {
+			if err != nil {
+				walk.MsgBox(g.mw, appName, err.Error(), walk.MsgBoxIconWarning)
+				return
+			}
+			names, err := storeImported(g.app.store, profs)
+			if len(names) > 0 {
+				g.reloadProfiles(names[0])
+				g.app.logf("imported %d profile(s) from the clipboard: %s", len(names), strings.Join(names, ", "))
+			}
+			if err != nil {
+				walk.MsgBox(g.mw, appName, "Import stopped: "+err.Error(), walk.MsgBoxIconError)
+				return
+			}
+			walk.MsgBox(g.mw, appName, fmt.Sprintf("Imported %d profile(s):\r\n%s", len(names), strings.Join(names, "\r\n")), walk.MsgBoxIconInformation)
+		})
+	}()
 }
 
 func (g *gui) deleteSelected() {
