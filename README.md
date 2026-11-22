@@ -54,7 +54,7 @@ Source and releases: **<https://github.com/Sinakhani70/sshplus-panel>**
 
 Native Windows x64 desktop app (not web-based) with the panel's colours and logo; SSH + UDPGW VPN client for this panel's servers.
 
-**[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · **[⬇ Installer (choose install folder)](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [details](ck-client/README.md)
+**[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/ck-client.exe)** · **[⬇ Installer (choose install folder)](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/CK-Client-Setup.exe)** · [details](ck-client/README.md)
 
 - **VPN mode** (all apps, via a Wintun adapter) or **SOCKS5 proxy mode**; UDP (games, calls, DNS) goes through UDPGW (`127.0.0.1:7300`).
 - SSH over TCP or TLS/SNI, password or key login, auto-reconnect, host-key pinning.
@@ -103,7 +103,7 @@ The version is shown next to the logo, so you always know what is installed.
 Run the same install command again on server 1. Users, ports, tunnel, passwords and settings are kept. The panel re-applies the exit-server side by itself a few seconds after it starts. After updating from a version older than 1.5 the panel address is `https://`.
 
 ### Windows client
-Use the **CK Client** app to connect from Windows (SSH + UDPGW, VPN or proxy mode): **[⬇ Download CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [guide](ck-client/README.md). Enter an account's server, SSH port, username and password and keep UDPGW on `127.0.0.1:7300`.
+Use the **CK Client** app to connect from Windows (SSH + UDPGW, VPN or proxy mode): **[⬇ Download CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/CK-Client-Setup.exe)** · [guide](ck-client/README.md). Enter an account's server, SSH port, username and password and keep UDPGW on `127.0.0.1:7300`.
 
 ### Tunnel
 
@@ -295,7 +295,7 @@ Use this software only on servers you own or administer, and in accordance with 
 
 برنامه‌ی دسکتاپ بومی ویندوز ۶۴ بیت (نه تحت وب) با رنگ‌بندی و لوگوی پنل؛ کلاینت VPN با SSH و UDPGW برای سرورهای همین پنل.
 
-**[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · **[⬇ نصب‌کننده (انتخاب مسیر نصب)](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [توضیحات بیشتر](ck-client/README.md)
+**[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/ck-client.exe)** · **[⬇ نصب‌کننده (انتخاب مسیر نصب)](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/CK-Client-Setup.exe)** · [توضیحات بیشتر](ck-client/README.md)
 
 - **حالت VPN** (همه برنامه‌ها، با کارت شبکه Wintun) یا **حالت پراکسی SOCKS5**؛ ترافیک UDP (بازی، تماس، DNS) از UDPGW (`127.0.0.1:7300`) رد می‌شود.
 - SSH روی TCP یا TLS با SNI، ورود با رمز یا کلید، اتصال مجدد خودکار و ذخیره اثر انگشت کلید سرور.
@@ -344,7 +344,7 @@ Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must ch
 همان دستور نصب را دوباره روی سرور ۱ اجرا کن. کاربران، پورت‌ها، تانل، رمزها و تنظیمات حفظ می‌شوند. چند ثانیه بعد از بالا آمدن پنل، سمت سرور خروجی را خودش دوباره اعمال می‌کند. بعد از آپدیت از نسخه‌های قدیمی‌تر از ۱.۵، آدرس پنل `https://` است.
 
 ### کلاینت ویندوز
-برای اتصال از ویندوز از برنامه‌ی **CK Client** استفاده کن (SSH + UDPGW، حالت VPN یا پراکسی): **[⬇ دانلود CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [راهنما](ck-client/README.md). آدرس سرور، پورت SSH، نام کاربری و رمز اکانت را وارد کن و UDPGW را روی `127.0.0.1:7300` روشن بگذار.
+برای اتصال از ویندوز از برنامه‌ی **CK Client** استفاده کن (SSH + UDPGW، حالت VPN یا پراکسی): **[⬇ دانلود CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/CK-Client-Setup.exe)** · [راهنما](ck-client/README.md). آدرس سرور، پورت SSH، نام کاربری و رمز اکانت را وارد کن و UDPGW را روی `127.0.0.1:7300` روشن بگذار.
 
 ### تانل
 

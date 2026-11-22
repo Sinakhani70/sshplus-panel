@@ -2915,8 +2915,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div style="font-size:.78rem;color:var(--mu);margin-top:.2rem">برای اتصال به همین سرور از برنامه‌ی ویندوزی CK Client (ویندوز ۶۴ بیت) استفاده کن: SSH همراه با UDPGW برای بازی، تماس و DNS، در حالت VPN کامل یا پراکسی. آدرس سرور، پورت SSH، نام کاربری و رمز اکانت را در برنامه وارد کن. آدرس UDPGW: <span dir="ltr">127.0.0.1:7300</span></div>
   </div>
   <div style="display:flex;gap:.4rem;flex-wrap:wrap">
-    <a class="btn btn-s" style="text-decoration:none;display:inline-block" href="https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe" target="_blank" rel="noopener noreferrer">⬇️ دانلود نصب‌کننده</a>
-    <a class="btn btn-s btn-o" style="text-decoration:none;display:inline-block" href="https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe" target="_blank" rel="noopener noreferrer">⬇️ نسخه‌ی قابل‌حمل</a>
+    <a class="btn btn-s" style="text-decoration:none;display:inline-block" href="https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/CK-Client-Setup.exe" target="_blank" rel="noopener noreferrer">⬇️ دانلود نصب‌کننده</a>
+    <a class="btn btn-s btn-o" style="text-decoration:none;display:inline-block" href="https://github.com/Sinakhani70/sshplus-panel/raw/main/ck-client/dist/ck-client.exe" target="_blank" rel="noopener noreferrer">⬇️ نسخه‌ی قابل‌حمل</a>
   </div>
 </div>
 
