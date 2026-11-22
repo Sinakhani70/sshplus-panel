@@ -198,6 +198,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 		os.WriteFile(stateFile(), []byte(srv+"\n"+gw+"\nnrpt\n"), 0o600)
 		return nil
 	}
+	logf("adding routes...")
 	// the SSH connection itself must keep using the real network
 	if !isLocalIP(srv) {
 		if err := addRoute(route{srv, "255.255.255.255", gw}, "if", ifidx); err != nil {
@@ -209,11 +210,13 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 			return fail(err)
 		}
 	}
+	logf("routes added (server via %s, everything else via the tunnel)", gw)
 	// IPv6: send it into the tunnel too so it cannot leak around it (best effort)
 	if _, err := run("netsh", "interface", "ipv6", "add", "address", tunName, tunIP6+"/64"); err == nil {
 		run("netsh", "interface", "ipv6", "add", "route", "::/1", tunName, "metric=1")
 		run("netsh", "interface", "ipv6", "add", "route", "8000::/1", tunName, "metric=1")
 	}
+	logf("setting adapter DNS...")
 	for i, d := range p.DNS {
 		if i == 0 {
 			run("netsh", "interface", "ipv4", "set", "dnsservers", "name="+tunName, "static", d, "primary", "validate=no")
@@ -221,6 +224,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 			run("netsh", "interface", "ipv4", "add", "dnsservers", "name="+tunName, d, "index="+strconv.Itoa(i+1), "validate=no")
 		}
 	}
+	logf("forcing DNS through the tunnel (takes a few seconds)...")
 	// Windows asks every adapter's DNS in parallel and the ISP's (often poisoned)
 	// answer wins; a catch-all NRPT rule makes it use only our DNS servers.
 	if len(p.DNS) > 0 {
