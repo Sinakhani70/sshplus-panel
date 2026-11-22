@@ -131,11 +131,13 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 
 	// 2. create the TUN adapter + netstack
 	cleanupStale(logf)
+	logf("creating the virtual adapter...")
 	wgtun.WintunTunnelType = "CK Client"
 	dev, err := tun.Open(tunName, vpnMTU)
 	if err != nil {
 		return nil, fmt.Errorf("create adapter: %w", err)
 	}
+	logf("adapter created, starting network stack...")
 	stack, err := core.CreateStack(&core.Config{
 		LinkEndpoint:     dev,
 		TransportHandler: &vpnHandler{t: t, useGW: p.UdpgwEnabled, logf: logf},
@@ -171,6 +173,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 	if lastErr != nil {
 		return fail(fmt.Errorf("set adapter address: %w", lastErr))
 	}
+	logf("adapter address %s set", tunIP)
 	run("netsh", "interface", "ipv4", "set", "interface", tunName, "metric=1")
 
 	tunIdx := ""
