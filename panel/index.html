@@ -344,6 +344,15 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   </div>
 
   <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🛡️ آدرس‌های مجاز برای ورود به پنل</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">فقط این آدرس‌ها (یا محدوده‌ها مثل 203.0.113.0/24) به پنل می‌رسند؛ خالی یعنی همه. هر آدرس در یک خط یا جدا با ویرگول. آدرس فعلی خودت باید در لیست باشد. لینک‌های اشتراک کاربران همیشه باز می‌مانند.</div>
+    <textarea id="alwList" rows="3" dir="ltr" autocapitalize="none" placeholder="203.0.113.7"></textarea>
+    <div id="alwMe" style="font-size:.76rem;color:var(--mu);margin:.3rem 0 .6rem;direction:ltr;text-align:left"></div>
+    <button class="btn btn-s" onclick="saveAllow()">ذخیره‌ی آدرس‌های مجاز</button>
+    <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin-top:.6rem">اگر قفل شدی، روی سرور بزن: <code>python3 /opt/sshplus-panel/app.py --allow-off</code></div>
+  </div>
+
+  <div class="card">
     <h3 style="margin-bottom:.6rem;color:var(--pr)">💾 بکاپ و بازیابی</h3>
     <div id="bkWarn" style="font-size:.8rem;color:var(--wn);margin-bottom:.4rem"></div>
     <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.</div>

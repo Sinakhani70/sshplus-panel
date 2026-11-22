@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -388,6 +389,49 @@ class TlsExtras(unittest.TestCase):
         x["tls"].update({"sni": "", "insecure": True, "host": "1.2.3.4"})
         t = app.tls_manual_text(x); self.assertIn("yes (self-signed)", t); self.assertNotIn("-servername", t)
         self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
+
+
+class SecurityHardening(unittest.TestCase):
+    def test_anchors_refuse_trailing_newline(self):
+        for rx, ok in ((app.NAME_RE, "alice"), (app.HOST_RE, "1.2.3.4"), (app.TUSER_RE, "root"), (app.IP_RE, "10.0.0.1")):
+            self.assertTrue(rx.match(ok)); self.assertIsNone(rx.match(ok + "\n"))
+        self.assertIsNone(app.sub_find("a" * 24 + "\n"))
+
+    def test_request_length_is_checked_before_reading(self):
+        self.assertEqual(app.req_len("12", "/api/login"), (12, 0))
+        self.assertEqual(app.req_len(None, "/api/login"), (0, 0))
+        self.assertEqual(app.req_len("-1", "/api/login"), (0, 400))
+        self.assertEqual(app.req_len("abc", "/api/login"), (0, 400))
+        self.assertEqual(app.req_len(str(2 << 20), "/api/login"), (0, 413))
+        self.assertEqual(app.req_len(str(2 << 20), "/api/restore"), (2 << 20, 0))
+        self.assertEqual(app.req_len(str(64 << 20), "/api/restore"), (0, 413))
+
+    def test_allowlist(self):
+        self.assertTrue(app.ip_allowed("8.8.8.8", []))
+        al = app.allow_parse(["203.0.113.7", " 10.0.0.0/8 ", "203.0.113.7", "", "2001:db8::/32"])
+        self.assertEqual(al, ["203.0.113.7/32", "10.0.0.0/8", "2001:db8::/32"])
+        self.assertTrue(app.ip_allowed("10.1.2.3", al)); self.assertTrue(app.ip_allowed("203.0.113.7", al))
+        self.assertFalse(app.ip_allowed("203.0.113.8", al)); self.assertFalse(app.ip_allowed("not-an-ip", al))
+        self.assertTrue(app.ip_allowed("::ffff:10.1.2.3", al))                         # IPv4 seen through a dual-stack socket
+        with self.assertRaises(ValueError): app.allow_parse(["1.2.3.4; rm -rf /"])
+        with self.assertRaises(ValueError): app.allow_parse(["10.0.0.%d" % i for i in range(60)])
+
+    def test_allowlist_cannot_lock_out_the_caller(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.CFG; app.CFG = os.path.join(d, "panel.json")
+            try:
+                c, r = app.allow_save({"list": "203.0.113.9"}, "198.51.100.1"); self.assertEqual(c, 400); self.assertFalse(os.path.exists(app.CFG))
+                c, r = app.allow_save({"list": "203.0.113.9, 198.51.100.0/24"}, "198.51.100.1"); self.assertEqual(c, 200)
+                self.assertEqual(json.load(open(app.CFG))["allow"], ["203.0.113.9/32", "198.51.100.0/24"])
+                c, r = app.allow_save({"list": []}, "198.51.100.1"); self.assertEqual((c, json.load(open(app.CFG))["allow"]), (200, []))
+            finally: app.CFG = old
+
+    def test_prune_auth(self):
+        app.TOK.clear(); app.FAIL.clear(); now = time.time()
+        app.TOK.update({"old": now - 5, "new": now + 500}); app.FAIL.update({"1.1.1.1": [now - 400], "2.2.2.2": [now - 10]})
+        app.prune_auth()
+        self.assertEqual(list(app.TOK), ["new"]); self.assertEqual(list(app.FAIL), ["2.2.2.2"])
+        app.TOK.clear(); app.FAIL.clear()
 
 
 class ExitUpdate(unittest.TestCase):

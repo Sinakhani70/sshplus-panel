@@ -12,7 +12,7 @@ TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}; DBA={}; IPS={}
 STATE={"first":True}; CACHE={"t":0.0,"v":None}; SSHP={"t":0.0,"v":set()}
 LOCK=threading.Lock(); ML=threading.RLock()
 ENV={"LC_ALL":"C","PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
+NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}\Z")
 # An account = type (direct / tunnel) x connection (both / normal only / TLS only). The login shell encodes it and every Dropbear
 # instance lists only the shells it serves in its own /etc/shells (see the systemd units), so e.g. a TLS-only account is refused on the plain ports.
 SHELLS={("direct","both"):SHELL,("tunnel","both"):SHELL_T,("direct","normal"):SHELL+"-n",("tunnel","normal"):SHELL+"-tn",
@@ -378,18 +378,22 @@ def apply_ports(d):
   tdb=tdb[:4]
   if not tdb: return 400,{"ok":0,"msg":"At least one valid tunnel Dropbear port is required"}
   bak=open(SSHCONF).read() if os.path.exists(SSHCONF) else None
-  lines=[f"Port {x}" for x in sorted(ssh_set)]+[
+  # Port lines in this file that the panel does not manage (e.g. a main SSH port such as 9011 someone put here) are kept as they are
+  keep={q for q in (to_port(m) for m in re.findall(r"(?m)^Port[ \t]+(\d+)[ \t]*$",bak or "")) if q}-managed-ssh_set
+  lines=[f"Port {x}" for x in sorted(ssh_set|keep)]+[
     "PasswordAuthentication yes","PermitRootLogin yes","UsePAM yes","AllowTcpForwarding yes",
-    "AllowStreamLocalForwarding yes","AllowAgentForwarding yes","GatewayPorts yes","PermitTunnel yes",
+    "AllowStreamLocalForwarding yes","AllowAgentForwarding no","GatewayPorts no","PermitTunnel yes",
     "TCPKeepAlive yes","ClientAliveInterval 30","ClientAliveCountMax 10","MaxSessions 100","MaxStartups 100:30:200"]
-  open(SSHCONF,"w").write("\n".join(lines)+"\n")
+  newtxt="\n".join(lines)+"\n"
+  open(SSHCONF,"w").write(newtxt)
   rc,_,er=cmd(["sshd","-t"])
   if rc!=0:
     if bak is not None: open(SSHCONF,"w").write(bak)
     return 400,{"ok":0,"msg":"sshd config invalid: "+er[:120]}
   wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb}); SSHP["t"]=0
   ufw_open(ssh_set|set(db)|set(tdb)|{panel})
-  if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
+  if bak!=newtxt:                                   # sshd (and with it every SSH port, 9011 included) is only reloaded when its configuration really changed
+    if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
   cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
   if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()
   return 200,{"ok":1,"db":db,"tdb":tdb,"dropped":dropped}
@@ -415,8 +419,8 @@ def save_bv(d):
 TCONF="/etc/SSHPlus/tunnel.conf"; TKEY="/etc/SSHPlus/tunnel_key"; TKH="/etc/SSHPlus/tunnel_known_hosts"
 TNET="/usr/local/bin/sshplus-tunnel-net"; TUN_DEV="tun99"; TUN_ID=99; TUN_LOCAL="10.99.0.1"; TUN_REMOTE="10.99.0.2"
 TS={"run":False,"steps":[],"ok":None}; TSL=threading.Lock(); CLI=[False]
-HOST_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"); TUSER_RE=re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
-IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}$")
+HOST_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}\Z"); TUSER_RE=re.compile(r"^[a-z_][a-z0-9_-]{0,31}\Z")
+IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}\Z")
 
 # executed on the exit server (stdin of "bash -s")
 REMOTE_SCRIPT=r'''set -e
@@ -432,8 +436,9 @@ fi
 if [ ! -c /dev/net/tun ]; then modprobe tun 2>/dev/null || true; mkdir -p /dev/net; [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true; chmod 600 /dev/net/tun 2>/dev/null || true; fi
 [ -c /dev/net/tun ] || { echo "the exit server has no /dev/net/tun (OpenVZ/LXC VPS: enable TUN/TAP in its provider panel)"; exit 13; }
 mkdir -p /etc/ssh/sshd_config.d
-echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
 CHK='^permittunnel (yes|point-to-point)'
+HAD_TUN=0; sshd -T 2>/dev/null | grep -qiE "$CHK" && HAD_TUN=1          # already effective: sshd must not be reloaded again (it also serves this server's own SSH ports)
+echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
 if ! sshd -T 2>/dev/null | grep -qiE "$CHK"; then
   cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.sshplus.bak
   sed -i '1i PermitTunnel yes' /etc/ssh/sshd_config
@@ -444,7 +449,7 @@ if ! sshd -t 2>/dev/null; then
   echo "sshd config invalid after change (rolled back)"; exit 12
 fi
 sshd -T 2>/dev/null | grep -qiE "$CHK" || { echo "PermitTunnel could not be enabled"; exit 12; }
-(systemctl reload ssh || systemctl reload sshd) >/dev/null 2>&1 || true
+[ "$HAD_TUN" = 1 ] || (systemctl reload ssh || systemctl reload sshd) >/dev/null 2>&1 || true
 printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/98-sshplus-exit.conf
 # ports of THIS server that are forwarded through the tunnel to the panel server ("enter via exit server" routing)
 if [ "${REV_PORTS+x}" = x ]; then printf '%s\n' "$REV_PORTS" > /etc/sshplus-exit.ports; fi
@@ -1007,7 +1012,7 @@ def mon():
       if n==4:                                                             # once per panel start / update
         threading.Thread(target=ports_sync,daemon=True).start(); sshd_deny_sync()
       if n%20==0:                                                          # every minute: history + Telegram alerts
-        stunnel_log_trim()
+        prune_auth(); stunnel_log_trim()
         try: alerts_tick(hist_tick())
         except Exception: pass
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
@@ -1744,7 +1749,7 @@ def user_bulk(d):
   prefix=str(d.get("prefix","")).strip()
   try: count=int(d.get("count",0)); start=int(d.get("start",1) or 1)
   except Exception: return 400,{"ok":0,"msg":"Invalid count"}
-  if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,20}$",prefix): return 400,{"ok":0,"msg":"Invalid prefix (letters/digits, max 21 chars)"}
+  if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,20}\Z",prefix): return 400,{"ok":0,"msg":"Invalid prefix (letters/digits, max 21 chars)"}
   if not 1<=count<=200: return 400,{"ok":0,"msg":"Count must be 1..200"}
   same=str(d.get("pw","")).strip(); width=len(str(start+count-1)); made=[]; errs=[]
   for i in range(count):
@@ -1756,7 +1761,7 @@ def user_bulk(d):
 
 # ---- 6) subscription links and QR codes
 def sub_find(tok):
-  if not re.match(r"^[0-9a-f]{24}$",str(tok)): return None
+  if not re.match(r"^[0-9a-f]{24}\Z",str(tok)): return None
   for u,m in rjson(META,{}).items():
     if m.get("tok")==tok and u in user_uid_map(): return u
   return None
@@ -1905,6 +1910,59 @@ def hist_get():
   return {"s":h.get("s",[]),"d":{k:h["d"][k] for k in days}}
 
 # ---------- HTTP ----------
+import ipaddress
+def req_len(raw,path):
+  # Content-Length of a request body: (bytes, 0) or (0, http status). Negative / non-numeric / oversize bodies are refused before reading
+  try: n=int(str(raw if raw is not None else "0").strip())
+  except ValueError: return 0,400
+  if n<0: return 0,400
+  if n>(32<<20 if path=="/api/restore" else 1<<20): return 0,413
+  return n,0
+
+def ip_allowed(ip,allow):
+  # panel IP allowlist: empty list = everybody
+  if not allow: return True
+  try:
+    a=ipaddress.ip_address(str(ip).split("%")[0])
+    if a.version==6 and a.ipv4_mapped: a=a.ipv4_mapped
+  except ValueError: return False
+  for n in allow:
+    try:
+      if a in ipaddress.ip_network(str(n),strict=False): return True
+    except ValueError: continue
+  return False
+
+def allow_parse(items):
+  out=[]
+  for x in items[:200]:
+    x=str(x).strip()
+    if not x: continue
+    try: n=str(ipaddress.ip_network(x,strict=False))
+    except ValueError: raise ValueError(x[:60])
+    if n not in out: out.append(n)
+  if len(out)>50: raise ValueError("max 50 entries")
+  return out
+
+def allow_save(d,me):
+  raw=d.get("list",[])
+  if isinstance(raw,str): raw=re.split(r"[\s,;]+",raw)
+  if not isinstance(raw,list): return 400,{"ok":0,"msg":"Invalid list"}
+  try: lst=allow_parse(raw)
+  except ValueError as e: return 400,{"ok":0,"msg":"Invalid address: "+str(e)}
+  if lst and not ip_allowed(me,lst): return 400,{"ok":0,"msg":"Your own address ("+me+") must be in the list, otherwise you would lock yourself out"}
+  c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"}); c["allow"]=lst; wjson(CFG,c)
+  return 200,{"ok":1,"list":lst}
+
+def prune_auth():
+  now=time.time()
+  for t in [k for k,v in list(TOK.items()) if v<=now]: TOK.pop(t,None)
+  for k in list(FAIL):
+    FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
+    if not FAIL[k]: FAIL.pop(k,None)
+
+def cli_allow_off():
+  c=rjson(CFG,{}); c["allow"]=[]; wjson(CFG,c); print("IP allowlist cleared: the panel accepts every address again."); return 0
+
 class Srv(ThreadingHTTPServer):
   allow_reuse_address=True; daemon_threads=True; request_queue_size=64; ctx=None
   def finish_request(s,request,client_address):
@@ -1920,7 +1978,7 @@ class Srv(ThreadingHTTPServer):
           host=re.sub(r"[^A-Za-z0-9.:\[\]-]","",host) or "localhost"
           request.sendall(("HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"%host).encode())
           return
-        request.settimeout(None)
+        request.settimeout(30)                   # idle timeout per read: a stalled client can no longer hold a thread forever
       s.RequestHandlerClass(request,client_address,s)
     except Exception: pass
     finally:
@@ -1928,7 +1986,11 @@ class Srv(ThreadingHTTPServer):
       except Exception: pass
 
 class H(BaseHTTPRequestHandler):
+  timeout=30
   def log_message(s,*a): pass
+  def blocked(s,p):
+    if p.startswith("/s/"): return False                      # public subscription links stay reachable for users' apps
+    return not ip_allowed(s.client_address[0],rjson(CFG,{}).get("allow") or [])
   def js(s,d,c=200):
     b=json.dumps(d).encode("utf-8")
     s.send_response(c); s.send_header("Content-Type","application/json; charset=utf-8")
@@ -1943,6 +2005,7 @@ class H(BaseHTTPRequestHandler):
   def do_GET(s):
     try:
       p=urlparse(s.path).path
+      if s.blocked(p): s.js({"err":3},403); return
       if p in ("/","/index.html"):
         b=open(HTML,"rb").read()
         s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
@@ -1968,6 +2031,7 @@ class H(BaseHTTPRequestHandler):
         u=parse_qs(urlparse(s.path).query).get("u",[""])[0]; x=sub_data(u,s.headers.get("Host",""))
         if not x: s.js({"err":404},404); return
         s.js({"ssh":ssh_uris(x),"sshb":ssh_uris(x,True),"plain_sub":bool(rjson(CFG,{}).get("plain_sub")),"tlsinfo":tls_manual_text(x)}); return
+      if p=="/api/allow": s.js({"list":rjson(CFG,{}).get("allow") or [],"me":s.client_address[0]}); return
       if p=="/api/history": s.js(hist_get()); return
       if p=="/api/telegram": s.js(tg_state()); return
       if p=="/api/templates": s.js(tpl_list()); return
@@ -1985,7 +2049,10 @@ class H(BaseHTTPRequestHandler):
       except Exception: pass
   def do_POST(s):
     try:
-      p=urlparse(s.path).path; ln=int(s.headers.get("Content-Length",0))
+      p=urlparse(s.path).path
+      if s.blocked(p): s.js({"err":3},403); return
+      ln,le=req_len(s.headers.get("Content-Length"),p)
+      if le: s.js({"err":le},le); return
       try: d=json.loads(s.rfile.read(ln).decode("utf-8")) if ln>0 else {}
       except Exception: d={}
       if p=="/api/login":
@@ -2040,6 +2107,7 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/tunnel/restart": c,r=tunnel_restart(); s.js(r,c)
       elif p=="/api/tunnel/test": c,r=tunnel_test(); s.js(r,c)
       elif p=="/api/tunnel/remove": c,r=tunnel_remove(); s.js(r,c)
+      elif p=="/api/allow": c,r=allow_save(d,s.client_address[0]); s.js(r,c)
       elif p=="/api/admin":
         c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"})
         au=str(d.get("u","")).strip() or str(c.get("username","admin")).strip()
@@ -2047,6 +2115,7 @@ class H(BaseHTTPRequestHandler):
         if must_change() and (len(ap)<8 or ap=="admin"): s.js({"ok":0,"msg":"New password must be at least 8 characters and not 'admin'"},400); return
         if len(au)>=2 and len(ap)>=2:
           c["username"]=au; c["password"]=ap; wjson(CFG,c)
+          TOK.clear()                                                     # a changed password signs out every other session
           t=secrets.token_hex(16); TOK[t]=time.time()+86400
           s.js({"ok":1,"u":au,"p":ap,"tok":t})
         else: s.js({"ok":0,"msg":"Min 2 chars"},400)
@@ -2068,6 +2137,7 @@ def cli_tunnel_setup(host,port,user,mode="ssh"):
 if __name__=="__main__":
   if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5] if len(sys.argv)>5 else "ssh"))
   if len(sys.argv)>=3 and sys.argv[1]=="--cert-renewed": sys.exit(cli_cert_renewed(sys.argv[2]))
+  if len(sys.argv)>=2 and sys.argv[1]=="--allow-off": sys.exit(cli_allow_off())
   open(DB,"a").close()
   try: migrate_secrets()
   except Exception: pass

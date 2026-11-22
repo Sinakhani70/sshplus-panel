@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (gaming: stable ping)
+### Security
+- **Panel: stalled or oversized requests.** A client that completed the TLS handshake and then stalled was never timed out (a held thread each). Every connection now has a 30 s idle timeout; a negative or non-numeric `Content-Length` is refused (400), bodies above 1 MB (32 MB for `/api/restore`) are refused (413) before anything is read. Checked: the 40 s stall test now ends after 30 s.
+- **Optional panel IP allowlist** (Settings): addresses or ranges (IPv4/IPv6); empty = everybody. A list that excludes your own address is refused, users' subscription links (`/s/…`) stay reachable, and `python3 /opt/sshplus-panel/app.py --allow-off` clears it from the server.
+- Expired sessions and old failed-login records are pruned every minute; changing the panel password signs out every other session.
+- OpenSSH (ports 22/2222): `GatewayPorts no` and `AllowAgentForwarding no` (an account could open a public listener with `-R 0.0.0.0:port`; Dropbear never allowed it). VPN apps only need local forwarding.
+- sshd is only reloaded when its configuration really changed (installer, "save ports", and the exit-server script), because it also serves ports the panel does not manage. `Port` lines in `00-sshplus.conf` that the panel does not manage (e.g. a main SSH port such as 9011) are kept when ports are saved. The installer now reloads instead of restarting sshd.
+- Input patterns use `\Z` (a trailing newline was accepted by `$`).
+
 ## v1.7.1 — WireGuard tunnel type, HTTPS-through-tunnel fix, exit-server update
 ### Added
 - **"Update exit server" button** (Tunnel tab): rewrites the exit server's script and rules with the panel's current version without removing the tunnel (the exit side was only written at setup, so exit-side fixes needed a re-install). Keeps the current routing mode.

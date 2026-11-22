@@ -169,8 +169,8 @@ PermitRootLogin yes
 UsePAM yes
 AllowTcpForwarding yes
 AllowStreamLocalForwarding yes
-AllowAgentForwarding yes
-GatewayPorts yes
+AllowAgentForwarding no
+GatewayPorts no
 PermitTunnel yes
 TCPKeepAlive yes
 ClientAliveInterval 30
@@ -187,7 +187,12 @@ fi
 systemctl stop ssh.socket 2>/dev/null || true
 systemctl disable ssh.socket 2>/dev/null || true
 systemctl enable ssh.service >/dev/null 2>&1 || true
-systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+# sshd also serves ports the panel does not manage (e.g. a main SSH port): reload it only when its configuration really changed
+if [ -f /root/00-sshplus.conf.bak ] && cmp -s $F /root/00-sshplus.conf.bak && systemctl is-active --quiet ssh; then
+  echo "sshd configuration unchanged: no reload"
+else
+  systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+fi
 if ! systemctl is-active --quiet ssh; then
   echo "WARN: ssh بالا نیامد؛ فعال‌سازی socket"
   systemctl enable --now ssh.socket 2>/dev/null || true
