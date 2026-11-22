@@ -102,6 +102,9 @@ The version is shown next to the logo, so you always know what is installed.
 ### Updating
 Run the same install command again on server 1. Users, ports, tunnel, passwords and settings are kept. The panel re-applies the exit-server side by itself a few seconds after it starts. After updating from a version older than 1.5 the panel address is `https://`.
 
+### Windows client
+Use the **CK Client** app to connect from Windows (SSH + UDPGW, VPN or proxy mode): **[⬇ Download CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [guide](ck-client/README.md). Enter an account's server, SSH port, username and password and keep UDPGW on `127.0.0.1:7300`.
+
 ### Tunnel
 
 Users connect to this server (server 1). The exit server (server 2) is only used for the traffic you send through it.
@@ -339,6 +342,9 @@ Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must ch
 
 ### آپدیت
 همان دستور نصب را دوباره روی سرور ۱ اجرا کن. کاربران، پورت‌ها، تانل، رمزها و تنظیمات حفظ می‌شوند. چند ثانیه بعد از بالا آمدن پنل، سمت سرور خروجی را خودش دوباره اعمال می‌کند. بعد از آپدیت از نسخه‌های قدیمی‌تر از ۱.۵، آدرس پنل `https://` است.
+
+### کلاینت ویندوز
+برای اتصال از ویندوز از برنامه‌ی **CK Client** استفاده کن (SSH + UDPGW، حالت VPN یا پراکسی): **[⬇ دانلود CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [راهنما](ck-client/README.md). آدرس سرور، پورت SSH، نام کاربری و رمز اکانت را وارد کن و UDPGW را روی `127.0.0.1:7300` روشن بگذار.
 
 ### تانل
 
