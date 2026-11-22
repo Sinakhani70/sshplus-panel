@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.7.1  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.8.0  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.7.1"
+VERSION="1.8.0"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -79,8 +79,9 @@ while true; do sleep 3600 & wait $!; done
 EOF
 chmod 755 /usr/local/bin/sshplus-shell
 # tunnel accounts use their own shell (same behaviour); the shell tells which Dropbear instance accepts the account
-# account = type (direct/tunnel) x connection (both/normal/tls): -t tunnel, -n normal only, -s TLS only, -tn / -ts the tunnel variants
-ALLSH="sshplus-shell sshplus-shell-t sshplus-shell-n sshplus-shell-tn sshplus-shell-s sshplus-shell-ts"
+# account = type (direct/tunnel) x connection (both/normal/tls): -t tunnel, -n normal only, -s TLS only, -tn / -ts the tunnel variants,
+# -g game account (direct only, its own Dropbear instance and port)
+ALLSH="sshplus-shell sshplus-shell-t sshplus-shell-n sshplus-shell-tn sshplus-shell-s sshplus-shell-ts sshplus-shell-g"
 for s in $ALLSH; do
   [ "$s" = sshplus-shell ] || install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/$s
   grep -qxF "/usr/local/bin/$s" /etc/shells || echo "/usr/local/bin/$s" >> /etc/shells
@@ -91,6 +92,7 @@ shells_file direct sshplus-shell   sshplus-shell-n      # plain ports, direct ac
 shells_file tunnel sshplus-shell-t sshplus-shell-tn     # plain ports, tunnel accounts
 shells_file tlsd   sshplus-shell   sshplus-shell-s      # TLS back end, direct accounts
 shells_file tlst   sshplus-shell-t sshplus-shell-ts     # TLS back end, tunnel accounts
+shells_file game   sshplus-shell-g                      # game instance: game accounts only
 
 # quick admin password change from terminal
 cat > /usr/local/bin/sshplus-pass <<'EOF'
@@ -158,8 +160,17 @@ tdb=old_t[:4]
 for v in (2087,2096,4443,8444,2095):
     if len(tdb)>=2: break
     if v not in res and v not in db and v not in tdb: tdb.append(v)
-json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb},open(p,"w"))
-print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb)
+old_g=[]                               # game instance: keep its ports, otherwise pick one free port
+for x in d.get("gdb",[]):
+    try: v=int(x)
+    except Exception: continue
+    if 0<v<65536 and v not in res and v not in db and v not in tdb and v not in old_g: old_g.append(v)
+gdb=old_g[:2]
+for v in (4455,4466,8099,9099,7788):
+    if gdb: break
+    if v not in res and v not in db and v not in tdb: gdb.append(v)
+json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb,"gdb":gdb},open(p,"w"))
+print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb,"| Game Dropbear ports:",gdb)
 PY
 chmod 600 /etc/SSHPlus/panel.json /etc/SSHPlus/meta.json /root/users.db
 echo "=== STEP 1 OK ==="
@@ -181,8 +192,8 @@ PermitRootLogin yes
 UsePAM yes
 AllowTcpForwarding yes
 AllowStreamLocalForwarding yes
-AllowAgentForwarding yes
-GatewayPorts yes
+AllowAgentForwarding no
+GatewayPorts no
 PermitTunnel yes
 TCPKeepAlive yes
 ClientAliveInterval 30
@@ -199,7 +210,12 @@ fi
 systemctl stop ssh.socket 2>/dev/null || true
 systemctl disable ssh.socket 2>/dev/null || true
 systemctl enable ssh.service >/dev/null 2>&1 || true
-systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+# sshd also serves ports the panel does not manage (e.g. a main SSH port): reload it only when its configuration really changed
+if [ -f /root/00-sshplus.conf.bak ] && cmp -s $F /root/00-sshplus.conf.bak && systemctl is-active --quiet ssh; then
+  echo "sshd configuration unchanged: no reload"
+else
+  systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+fi
 if ! systemctl is-active --quiet ssh; then
   echo "WARN: ssh بالا نیامد؛ فعال‌سازی socket"
   systemctl enable --now ssh.socket 2>/dev/null || true
@@ -208,8 +224,9 @@ fi
 # Dropbear: "direct" instance (ports.json "db", up to 6) and "tunnel" instance (ports.json "tdb")
 cat > /usr/local/bin/start-dropbear.sh <<'EOF'
 #!/bin/bash
-# usage: start-dropbear.sh direct|tunnel|tlsd|tlst
+# usage: start-dropbear.sh direct|tunnel|game|tlsd|tlst
 #   direct / tunnel : public ports from ports.json ("db" / "tdb")
+#   game            : the game accounts' own instance, ports.json "gdb" (up to 2 ports)
 #   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt").
 #                     TLS_BACKENDS (6) Dropbear processes on consecutive ports: Dropbear refuses more than 5 unauthenticated
 #                     connections per source IP and every TLS client reaches it from 127.0.0.1, so stunnel spreads them round-robin.
@@ -228,15 +245,15 @@ if mode in ("tlsd","tlst"):
     except Exception: v=dflt
     print(v if 0<v<65500 else dflt)
     sys.exit(0)
-key="tdb" if mode=="tunnel" else "db"
-dflt="-p 2087" if mode=="tunnel" else "-p 442 -p 444"
+key={"tunnel":"tdb","game":"gdb"}.get(mode,"db")
+dflt={"tunnel":"-p 2087","game":"-p 4455"}.get(mode,"-p 442 -p 444")
 try:
     d=json.load(open("/etc/SSHPlus/ports.json")); out=[]
     for x in d.get(key,[]):
         try: v=int(x)
         except Exception: continue
         if 0<v<65536 and v not in (22,2053) and v not in out: out.append(v)
-    print(" ".join("-p %d"%p for p in out[:6]) or dflt)
+    print(" ".join("-p %d"%p for p in out[:2 if mode=="game" else 6]) or dflt)
 except Exception:
     print(dflt)
 PY
@@ -251,6 +268,7 @@ case "$MODE" in
     for i in $(seq 0 $((TLS_BACKENDS-1))); do "${DB[@]}" -p 127.0.0.1:$((P+i)) & done
     trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
     wait -n                                   # one of them died: stop the rest, systemd restarts the unit
+    # shellcheck disable=SC2046
     kill $(jobs -p) 2>/dev/null; exit 1 ;;
   *) exec "${DB[@]}" $P ;;
 esac
@@ -527,6 +545,23 @@ Nice=-5
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/sshplus-dropbear-g.service <<'EOF'
+[Unit]
+Description=SSH Plus Dropbear (game accounts: own instance and port)
+After=network.target
+StartLimitIntervalSec=0
+[Service]
+Type=simple
+BindReadOnlyPaths=/etc/SSHPlus/shells.game:/etc/shells
+ExecStart=/usr/local/bin/start-dropbear.sh game
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+Nice=-5
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat > /usr/local/bin/sshplus-tls-fw <<'EOF'
 #!/bin/bash
 # usage: sshplus-tls-fw apply|clean
@@ -737,14 +772,19 @@ TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}; DBA={}; IPS={}
 STATE={"first":True}; CACHE={"t":0.0,"v":None}; SSHP={"t":0.0,"v":set()}
 LOCK=threading.Lock(); ML=threading.RLock()
 ENV={"LC_ALL":"C","PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
+NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}\Z")
 # An account = type (direct / tunnel) x connection (both / normal only / TLS only). The login shell encodes it and every Dropbear
 # instance lists only the shells it serves in its own /etc/shells (see the systemd units), so e.g. a TLS-only account is refused on the plain ports.
 SHELLS={("direct","both"):SHELL,("tunnel","both"):SHELL_T,("direct","normal"):SHELL+"-n",("tunnel","normal"):SHELL+"-tn",
-        ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts"}
+        ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts",
+        ("direct","game"):SHELL+"-g"}                                      # game accounts: own Dropbear instance + port, direct only
 SHELL_OF={v:k for k,v in SHELLS.items()}
 TLS_BACKENDS=6                                   # Dropbear processes per TLS instance (keep in line with scripts/start-dropbear.sh)
-def shell_for(tm,cx): return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
+def shell_for(tm,cx):
+  if cx=="game": return SHELLS[("direct","game")]
+  return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
+def game_ports():
+  return [p for p in (to_port(x) for x in rjson(PORTS,{}).get("gdb",[])) if p][:2]
 def is_tun(sh): return SHELL_OF.get(sh,("direct",""))[0]=="tunnel"
 SSHDENY="/etc/ssh/sshd_config.d/02-sshplus-deny.conf"
 
@@ -899,7 +939,7 @@ def _on_map():
   unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>15]
   if unknown:
     for p in unknown: DBT[p]=now
-    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-n","3000","--no-pager","-o","cat"],20)
+    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-u","sshplus-dropbear-g","-n","3000","--no-pager","-o","cat"],20)
     for jl in j.splitlines():
       mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)' from (\S+):(\d+)\s*$",jl)
       if mt: DBU[int(mt.group(1))]=mt.group(2); DBA[int(mt.group(1))]=(mt.group(3),int(mt.group(4)))
@@ -952,6 +992,196 @@ def bbr_set(on):
     cmd(["sysctl","-w","net.core.default_qdisc=fq_codel"]); cmd(["sysctl","-w","net.ipv4.tcp_congestion_control=cubic"])
   return True,""
 
+
+# ---------- Game Profile: low-latency network settings (sysctl + root qdisc), reversible; optional OpenSSH tuning ----------
+GAMEF="/etc/SSHPlus/game.json"; GAME_SYSF="/etc/sysctl.d/99-sshplus-game.conf"; GAME_SSHD="/etc/ssh/sshd_config.d/03-sshplus-game.conf"
+GAME_SYSCTL=(("net.core.default_qdisc","fq"),("net.ipv4.tcp_congestion_control","bbr"),("net.ipv4.tcp_notsent_lowat","16384"),("net.ipv4.tcp_slow_start_after_idle","0"))
+GAME_CIPHERS="chacha20-poly1305@openssh.com,aes128-gcm@openssh.com"
+DEV_RE=re.compile(r"^[A-Za-z0-9_.-]{1,15}\Z"); QD_RE=re.compile(r"^[a-z][a-z0-9_]{1,15}\Z")
+
+def wan_dev():
+  rc,o,_=cmd(["ip","-o","route","get","1.1.1.1"])
+  m=re.search(r"\bdev (\S+)",o) if rc==0 else None
+  return m.group(1) if m and DEV_RE.match(m.group(1)) else ""
+
+def root_qdisc(dev):
+  if not dev: return ""
+  rc,o,_=cmd(["tc","qdisc","show","dev",dev])
+  m=re.search(r"^qdisc (\S+) \S+ root\b",o,re.M) if rc==0 else None
+  return m.group(1) if m else ""
+
+def game_sshd_text(ciphers):
+  pc=rjson(PORTS,{"ssh":22,"ssh2":0})
+  ports=sorted({22,to_port(pc.get("ssh")) or 22}|({to_port(pc.get("ssh2"))} if to_port(pc.get("ssh2")) else set()))
+  t="# generated by the CK.VPN panel (Game Profile). Compression/UseDNS/Ciphers can only be global in sshd; IPQoS is limited to the panel's SSH ports.\nCompression no\nUseDNS no\n"
+  if ciphers: t+="Ciphers "+GAME_CIPHERS+"\n"
+  for p in ports: t+="Match LocalPort %d\n  IPQoS lowdelay\n"%p
+  return t
+
+def game_state():
+  g=rjson(GAMEF,{}); dev=wan_dev(); bb=bbr_state()
+  keys=[{"k":k,"want":v,"cur":sysctl_get(k)} for k,v in GAME_SYSCTL]
+  try: st=open(GAME_SSHD).read()
+  except OSError: st=""
+  return {"on":bool(g.get("on")),"keys":keys,"dev":dev,"qdisc":root_qdisc(dev),"bbr_avail":bb["avail"],"notes":g.get("notes",[]),
+          "sshd":{"on":bool(st),"ciphers":bool(re.search(r"(?m)^Ciphers ",st))}}
+
+def game_apply(on):
+  g=rjson(GAMEF,{}); notes=[]
+  if on:
+    prev=g.get("prev") or {}
+    if not g.get("on"):                                                    # remember what was there: disabling restores exactly this
+      prev={k:sysctl_get(k) for k,_ in GAME_SYSCTL}; dev=wan_dev(); prev["_qdisc"]={"dev":dev,"kind":root_qdisc(dev)}
+    bbr_state()                                                            # loads tcp_bbr when it exists
+    applied=[]
+    for k,v in GAME_SYSCTL:
+      if not sysctl_get(k): notes.append("%s: not available on this kernel"%k); continue
+      if k.endswith("congestion_control") and not bbr_state()["avail"]: notes.append("BBR is not available on this kernel"); continue
+      cmd(["sysctl","-w","%s=%s"%(k,v)])
+      if sysctl_get(k)==v: applied.append((k,v))
+      else: notes.append("%s: could not be set"%k)
+    open(GAME_SYSF,"w").write("# generated by the CK.VPN panel: Game Profile\n"+"".join("%s = %s\n"%kv for kv in applied))
+    MOD="/etc/modules-load.d/sshplus-bbr.conf"
+    if ("net.ipv4.tcp_congestion_control","bbr") in applied and not os.path.exists(MOD):      # load tcp_bbr at boot too (removed again when the profile is turned off)
+      os.makedirs("/etc/modules-load.d",exist_ok=True); open(MOD,"w").write("tcp_bbr\n"); prev["_mod"]=1
+    dev=wan_dev()
+    if dev and root_qdisc(dev)!="fq":                                      # default_qdisc only affects qdiscs created later: replace the root qdisc of the WAN interface too
+      cmd(["tc","qdisc","replace","dev",dev,"root","fq"])
+      if root_qdisc(dev)!="fq": notes.append("fq could not be set on %s (it stays %s)"%(dev,root_qdisc(dev) or "unknown"))
+    wjson(GAMEF,{"on":True,"prev":prev,"notes":notes,"ts":int(time.time())})
+  else:
+    prev=g.get("prev") or {}
+    for k,_ in GAME_SYSCTL:
+      v=str(prev.get(k,"")).strip()
+      if v and re.match(r"^[A-Za-z0-9_ .-]{1,40}\Z",v): cmd(["sysctl","-w","%s=%s"%(k,v)])
+    try: os.remove(GAME_SYSF)
+    except OSError: pass
+    if prev.get("_mod") and not os.path.exists(BBRF):
+      try: os.remove("/etc/modules-load.d/sshplus-bbr.conf")
+      except OSError: pass
+    q=prev.get("_qdisc") or {}; dev=str(q.get("dev","")); kind=str(q.get("kind",""))
+    if DEV_RE.match(dev) and root_qdisc(dev)=="fq":
+      if QD_RE.match(kind) and kind not in ("noqueue",): cmd(["tc","qdisc","replace","dev",dev,"root",kind])
+      if root_qdisc(dev)=="fq": cmd(["tc","qdisc","del","dev",dev,"root"])    # kind unknown or not restorable: back to the kernel default
+    wjson(GAMEF,{"on":False,"prev":{},"notes":[]})
+  return 200,dict(game_state(),ok=1,notes=notes)
+
+def game_sshd_apply(d):
+  # explicit, separate action: it needs an sshd reload (the same sshd serves every SSH port, a main one included)
+  on=bool(d.get("on")); cip=bool(d.get("ciphers")); old=None
+  try: old=open(GAME_SSHD).read()
+  except OSError: pass
+  new=game_sshd_text(cip) if on else None
+  if new==old: return 200,dict(game_state(),ok=1,reloaded=False)
+  try:
+    if new is None: os.remove(GAME_SSHD)
+    else: open(GAME_SSHD,"w").write(new)
+    if cmd(["sshd","-t"])[0]!=0: raise ValueError("sshd -t failed")
+  except Exception as e:
+    try:
+      if old is None: os.remove(GAME_SSHD)
+      else: open(GAME_SSHD,"w").write(old)
+    except OSError: pass
+    return 400,{"ok":0,"msg":"OpenSSH settings rejected (rolled back): "+str(e)[:100]}
+  if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
+  SSHP["t"]=0
+  return 200,dict(game_state(),ok=1,reloaded=True)
+
+
+# ---------- Network monitor: ping / jitter / loss from this server to chosen targets, plus per-session TCP stats ----------
+NETMON_CF="/etc/SSHPlus/netmon.json"; NETMON_HIST="/etc/SSHPlus/netmon_hist.json"; NM_KEEP=720            # 12 h at one sample per minute and target
+NM={"s":{},"n":0}; NML=threading.Lock()
+NM_DEFAULT=["1.1.1.1","8.8.8.8"]
+
+def nm_target(x):
+  # an IP literal or a plain host name; never anything that could look like an option
+  x=str(x).strip().lower()
+  try: return str(ipaddress.ip_address(x))
+  except ValueError: pass
+  return x if HOST_RE.match(x) and "." in x and len(x)<=100 else ""
+
+def netmon_cfg():
+  d=rjson(NETMON_CF,{}); tg=[]
+  for x in d.get("targets",NM_DEFAULT):
+    t=nm_target(x)
+    if t and t not in tg: tg.append(t)
+  return {"on":bool(d.get("on")),"targets":tg[:3] or list(NM_DEFAULT)}
+
+def netmon_save(d):
+  raw=d.get("targets",[])
+  if isinstance(raw,str): raw=re.split(r"[\s,;]+",raw)
+  if not isinstance(raw,list): return 400,{"ok":0,"msg":"Invalid targets"}
+  tg=[]
+  for x in raw:
+    if str(x).strip()=="": continue
+    t=nm_target(x)
+    if not t: return 400,{"ok":0,"msg":"Invalid target: "+str(x)[:60]}
+    if t not in tg: tg.append(t)
+  if len(tg)>3: return 400,{"ok":0,"msg":"At most 3 targets"}
+  wjson(NETMON_CF,{"on":bool(d.get("on")),"targets":tg or list(NM_DEFAULT)})
+  return 200,{"ok":1,**netmon_state()}
+
+def nm_sample(o):
+  # sample = [timestamp, mean rtt ms, jitter ms, loss %, max rtt ms]; jitter = mean absolute difference of consecutive replies
+  ts=[float(v) for v in re.findall(r"time[=<]([0-9.]+) ?ms",o)]
+  m=re.search(r"(\d+) packets transmitted, (\d+) (?:packets )?received",o)
+  sent,rcv=(int(m.group(1)),int(m.group(2))) if m else (0,0)
+  loss=round(100.0*(sent-rcv)/sent,1) if sent else 100.0
+  if not ts: return [int(time.time()),-1,0,loss,-1]
+  jit=sum(abs(b-a) for a,b in zip(ts,ts[1:]))/(len(ts)-1) if len(ts)>1 else 0.0
+  return [int(time.time()),round(sum(ts)/len(ts),1),round(jit,1),loss,round(max(ts),1)]
+
+def nm_round():
+  cfg=netmon_cfg()
+  for t in cfg["targets"]:
+    _,o,_=cmd(["ping","-n"]+(["-6"] if ":" in t else [])+["-c","10","-i","0.2","-W","1",t],25)
+    smp=nm_sample(o)
+    with NML:
+      sr=NM["s"].setdefault(t,[]); sr.append(smp); del sr[:-NM_KEEP]
+  with NML:
+    NM["n"]+=1
+    if NM["n"]%5==0: wjson(NETMON_HIST,{k:v for k,v in NM["s"].items() if k in cfg["targets"]})
+
+def netmon_loop():
+  with NML: NM["s"]=rjson(NETMON_HIST,{})
+  while True:
+    t0=time.time()
+    try:
+      if netmon_cfg()["on"]: nm_round()
+    except Exception: pass
+    time.sleep(max(5,60-(time.time()-t0)))
+
+def netmon_state():
+  cfg=netmon_cfg()
+  with NML: ser={t:list(NM["s"].get(t,[])) for t in cfg["targets"]}
+  return {"on":cfg["on"],"targets":cfg["targets"],"series":ser,"last":{t:(v[-1] if v else None) for t,v in ser.items()}}
+
+def net_sessions():
+  # per-connection TCP stats of the clients on the SSH/Dropbear/TLS ports, taken from this server's own TCP stack (ss -ti):
+  # the RTT here includes the client's mobile network, so it separates "the server" from "the path to the client"
+  pc=rjson(PORTS,{}); tl=tls_cfg()
+  ports=set(sshd_ports())|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|set(game_ports())|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set())
+  ports.discard(None)
+  rc,o,_=cmd(["ss","-tinH","state","established"],10)
+  byip={}
+  for u,ips in IPS.items():
+    for ip in ips: byip.setdefault(ip,[]).append(u)
+  rows=[]; head=None
+  for l in (o.splitlines() if rc==0 else []):
+    if l[:1] not in (" ","\t"):
+      f=l.split(); head=None
+      if len(f)>=4 and ":" in f[-1] and ":" in f[-2]:
+        lp=f[-2].rsplit(":",1)[1]; pe=f[-1].rsplit(":",1)[0].strip("[]")
+        if lp.isdigit() and int(lp) in ports and pe not in ("127.0.0.1","::1"): head=(int(lp),pe)
+      continue
+    if head is None: continue
+    r=re.search(r"\brtt:([0-9.]+)/([0-9.]+)",l); rt=re.search(r"\bretrans:(\d+)/(\d+)",l)
+    if r: rows.append({"port":head[0],"peer":head[1],"user":",".join(byip.get(head[1],[])[:2]),"rtt":float(r.group(1)),"var":float(r.group(2)),"retrans":int(rt.group(2)) if rt else 0})
+    head=None
+  rows.sort(key=lambda x:-x["rtt"])
+  rt=sorted(x["rtt"] for x in rows)
+  return {"n":len(rows),"median":rt[len(rt)//2] if rt else None,"with_retrans":sum(1 for x in rows if x["retrans"]>0),"rows":rows[:60]}
+
 # ---------- stats & users ----------
 def stats():
   try:
@@ -974,6 +1204,8 @@ def stats():
           "bvt":cmd(["systemctl","is-active","badvpn-t"])[0]==0,
           "db":cmd(["systemctl","is-active","sshplus-dropbear"])[0]==0,
           "dbt":cmd(["systemctl","is-active","sshplus-dropbear-t"])[0]==0,
+          "dbg":cmd(["systemctl","is-active","sshplus-dropbear-g"])[0]==0 if game_ports() else None,
+          "ssh":cmd(["systemctl","is-active","ssh"])[0]==0 or cmd(["systemctl","is-active","sshd"])[0]==0,
           "on_tot":sum(len(v) for v in om.values()),"om":{k:len(v) for k,v in om.items()}}
 
 def get_users(om):
@@ -1008,7 +1240,9 @@ def user_save(d):
   if not edit and not pw: return 400,{"ok":0,"msg":"Password required"}
   if not edit and days<=0: days=30
   cur=pm.get(u,(0,SHELL))[1]; ctm,ccx=SHELL_OF.get(cur,("direct","both")); tmq=str(d.get("tm","")); cxq=str(d.get("cx",""))
-  tm=tmq if tmq in ("tunnel","direct") else ctm; cx=cxq if cxq in ("both","normal","tls") else ccx
+  tm=tmq if tmq in ("tunnel","direct") else ctm; cx=cxq if cxq in ("both","normal","tls","game") else ccx
+  if cx=="game" and tm=="tunnel": return 400,{"ok":0,"msg":"Game accounts are direct-only (they cannot leave through the exit server)"}
+  if cx=="game" and not game_ports() and not (edit and ccx=="game"): return 400,{"ok":0,"msg":"No game Dropbear port is set (Settings > ports)"}
   shl=shell_for(tm,cx)                          # account type + connection type = login shell
   if tm=="tunnel" and ctm!="tunnel" and not tconf().get("TUN_HOST"):
     return 400,{"ok":0,"msg":"Tunnel is not set up yet (open the Tunnel tab first)"}
@@ -1102,33 +1336,53 @@ def apply_ports(d):
     else: dropped.append(str(x))
   tdb=tdb[:4]
   if not tdb: return 400,{"ok":0,"msg":"At least one valid tunnel Dropbear port is required"}
+  gdb=[]                                       # Dropbear ports of the game instance (0..2); an empty list switches the instance off
+  for x in (d["gdb"] if "gdb" in d else old.get("gdb",[])):
+    if str(x).strip()=="": continue
+    v=to_port(x)
+    if v and v not in reserved and v not in db and v not in tdb and v not in gdb: gdb.append(v)
+    else: dropped.append(str(x))
+  gdb=gdb[:2]
   bak=open(SSHCONF).read() if os.path.exists(SSHCONF) else None
-  lines=[f"Port {x}" for x in sorted(ssh_set)]+[
+  # Port lines in this file that the panel does not manage (e.g. a main SSH port such as 9011 someone put here) are kept as they are
+  keep={q for q in (to_port(m) for m in re.findall(r"(?m)^Port[ \t]+(\d+)[ \t]*$",bak or "")) if q}-managed-ssh_set
+  lines=[f"Port {x}" for x in sorted(ssh_set|keep)]+[
     "PasswordAuthentication yes","PermitRootLogin yes","UsePAM yes","AllowTcpForwarding yes",
-    "AllowStreamLocalForwarding yes","AllowAgentForwarding yes","GatewayPorts yes","PermitTunnel yes",
+    "AllowStreamLocalForwarding yes","AllowAgentForwarding no","GatewayPorts no","PermitTunnel yes",
     "TCPKeepAlive yes","ClientAliveInterval 30","ClientAliveCountMax 10","MaxSessions 100","MaxStartups 100:30:200"]
-  open(SSHCONF,"w").write("\n".join(lines)+"\n")
+  newtxt="\n".join(lines)+"\n"
+  open(SSHCONF,"w").write(newtxt)
   rc,_,er=cmd(["sshd","-t"])
   if rc!=0:
     if bak is not None: open(SSHCONF,"w").write(bak)
     return 400,{"ok":0,"msg":"sshd config invalid: "+er[:120]}
-  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb}); SSHP["t"]=0
-  ufw_open(ssh_set|set(db)|set(tdb)|{panel})
-  if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
-  cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb,"gdb":gdb}); SSHP["t"]=0
+  ufw_open(ssh_set|set(db)|set(tdb)|set(gdb)|{panel})
+  if bak!=newtxt:                                   # sshd (and with it every SSH port, 9011 included) is only reloaded when its configuration really changed
+    if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
+  cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"]); game_unit_sync()
   if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()
-  return 200,{"ok":1,"db":db,"tdb":tdb,"dropped":dropped}
+  return 200,{"ok":1,"db":db,"tdb":tdb,"gdb":gdb,"dropped":dropped}
+
+def game_unit_sync():
+  # the game Dropbear instance runs only while it has a port
+  if game_ports():
+    try: tls_shell_files()
+    except Exception: pass
+    cmd(["systemctl","enable","sshplus-dropbear-g"]); cmd(["systemctl","restart","sshplus-dropbear-g"])
+  else: cmd(["systemctl","disable","--now","sshplus-dropbear-g"])
 
 def save_bv(d):
   p=to_port(d.get("p")) or 7300
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[]})
-  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|tls_taken()
+  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|sshd_ports()|tls_taken()
   if p in used or p+1 in used or p+1>65535: return 400,{"ok":0,"msg":"Port (or port+1, used by the tunnel UDPGW) is already used by SSH/Dropbear/panel"}
   m=min(max(int(float(d.get("m") or 1200)),576),1500)
   c=min(max(int(float(d.get("c") or 1000)),1),10000)
   n=min(max(int(float(d.get("n") or 64)),1),1000)
   b=str(d.get("b","127.0.0.1")); b=b if b in ("127.0.0.1","0.0.0.0") else "127.0.0.1"  # nosec B104 - the admin may choose to expose UDPGW
-  open(BV,"w").write(f"UDP_PORT={p}\nBIND_ADDR={b}\nUDP_MTU={m}\nMAX_CLIENTS={c}\nMAX_CONN={n}\nSEND_BUFFER=65536\nMSS_CLAMP=1\n")
+  sb=d.get("s"); sb=65536 if sb in (None,"") else min(max(int(float(sb)),0),16777216)     # --client-socket-sndbuf <bytes / 0> (0 = system default)
+  open(BV,"w").write(f"UDP_PORT={p}\nBIND_ADDR={b}\nUDP_MTU={m}\nMAX_CLIENTS={c}\nMAX_CONN={n}\nSEND_BUFFER={sb}\nMSS_CLAMP=1\n")
   if b=="0.0.0.0": ufw_open({p})  # nosec B104
   cmd(["systemctl","restart","badvpn"]); cmd(["systemctl","restart","badvpn-t"])
   if os.path.exists(TNET): cmd([TNET,"sync"])          # UDPGW redirect for tunnel accounts follows the new port
@@ -1140,8 +1394,8 @@ def save_bv(d):
 TCONF="/etc/SSHPlus/tunnel.conf"; TKEY="/etc/SSHPlus/tunnel_key"; TKH="/etc/SSHPlus/tunnel_known_hosts"
 TNET="/usr/local/bin/sshplus-tunnel-net"; TUN_DEV="tun99"; TUN_ID=99; TUN_LOCAL="10.99.0.1"; TUN_REMOTE="10.99.0.2"
 TS={"run":False,"steps":[],"ok":None}; TSL=threading.Lock(); CLI=[False]
-HOST_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"); TUSER_RE=re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
-IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}$")
+HOST_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}\Z"); TUSER_RE=re.compile(r"^[a-z_][a-z0-9_-]{0,31}\Z")
+IP_RE=re.compile(r"^[0-9a-fA-F:.]{3,45}\Z")
 
 # executed on the exit server (stdin of "bash -s")
 REMOTE_SCRIPT=r'''set -e
@@ -1157,8 +1411,9 @@ fi
 if [ ! -c /dev/net/tun ]; then modprobe tun 2>/dev/null || true; mkdir -p /dev/net; [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true; chmod 600 /dev/net/tun 2>/dev/null || true; fi
 [ -c /dev/net/tun ] || { echo "the exit server has no /dev/net/tun (OpenVZ/LXC VPS: enable TUN/TAP in its provider panel)"; exit 13; }
 mkdir -p /etc/ssh/sshd_config.d
-echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
 CHK='^permittunnel (yes|point-to-point)'
+HAD_TUN=0; sshd -T 2>/dev/null | grep -qiE "$CHK" && HAD_TUN=1          # already effective: sshd must not be reloaded again (it also serves this server's own SSH ports)
+echo "PermitTunnel yes" > /etc/ssh/sshd_config.d/01-sshplus-tunnel.conf
 if ! sshd -T 2>/dev/null | grep -qiE "$CHK"; then
   cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.sshplus.bak
   sed -i '1i PermitTunnel yes' /etc/ssh/sshd_config
@@ -1169,7 +1424,7 @@ if ! sshd -t 2>/dev/null; then
   echo "sshd config invalid after change (rolled back)"; exit 12
 fi
 sshd -T 2>/dev/null | grep -qiE "$CHK" || { echo "PermitTunnel could not be enabled"; exit 12; }
-(systemctl reload ssh || systemctl reload sshd) >/dev/null 2>&1 || true
+[ "$HAD_TUN" = 1 ] || (systemctl reload ssh || systemctl reload sshd) >/dev/null 2>&1 || true
 printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/98-sshplus-exit.conf
 # ports of THIS server that are forwarded through the tunnel to the panel server ("enter via exit server" routing)
 if [ "${REV_PORTS+x}" = x ]; then printf '%s\n' "$REV_PORTS" > /etc/sshplus-exit.ports; fi
@@ -1468,7 +1723,7 @@ def tunnel_setup_run(host,port,user,pw,mode="ssh"):
     rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ok"],t=40)
     return (True,"") if rc==0 and o.endswith("ok") else (False,"ورود با کلید ناموفق: "+(er or o)[-250:])
   def f_remote():
-    fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[])))   # this server first
+    fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[]))|set(game_ports()))   # this server first
     if not wg: _run(["ssh"]+_ssh_o(port)+[tgt,"systemctl disable --now sshplus-exit-wg.service >/dev/null 2>&1; ip link show tun99 2>/dev/null | grep -q . && [ -f /etc/sshplus-wg/exit.conf ] && ip link del tun99; true"],t=40)
     mp=rev_map_calc(rev_ports(),remote_listeners(host,port,user))
     ent=",".join("%d:%d"%(b,a) for a,b in sorted(mp.items()))
@@ -1564,7 +1819,7 @@ def rev_ports():
   # panel-server ports that can be reached through the exit server's IP: Dropbear ports (direct + tunnel) + 2nd OpenSSH port
   pc=rjson(PORTS,{}); out=[]
   tl=tls_cfg(); extra=(tl["ports"]+tl["tports"]) if tl["on"] else []              # SSH over TLS: the public TLS ports too
-  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]+extra:
+  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+game_ports()+[pc.get("ssh2",0)]+extra:
     v=to_port(x)
     if v and v!=22 and v not in out: out.append(v)
   return out
@@ -1573,9 +1828,9 @@ def ports_autofix():
   # Dropbear ports (direct + tunnel) that another program already listens on are replaced by free ports
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[],"tdb":[]}); lis=listen_ports(); foreign=foreign_ports()
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))|tls_taken()
+  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|tls_taken()
   changes=[]
-  for key in ("db","tdb"):
+  for key in ("db","tdb","gdb"):
     out=[]
     for x in pc.get(key,[]):
       v=to_port(x)
@@ -1589,7 +1844,7 @@ def ports_autofix():
   if changes:
     wjson(PORTS,pc); SSHP["t"]=0
     ufw_open({c["to"] for c in changes})
-    cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+    cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"]); game_unit_sync()
   return changes
 
 def remote_listeners(host,port,user):
@@ -1659,7 +1914,7 @@ def ports_sync():
   # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
   rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
   pc=rjson(PORTS,{})
-  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
+  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
   if tconf().get("TUN_HOST"):
     c,r=tunnel_route_apply("both")
     if r.get("ok"): rep["map"]=r["map"]; rep["skipped"]=r["skipped"]; rep["fw_b"]=r.get("fw_b","none")
@@ -1722,7 +1977,7 @@ def mon():
   while True:
     try:
       if n%5==0:
-        svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"]
+        svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"]+(["sshplus-dropbear-g"] if game_ports() else [])
         if tconf().get("TUN_HOST"): svs.append("sshplus-tunnel")
         if tls_cfg()["on"]: svs+=list(TLS_SVC)
         for srv in svs:
@@ -1732,7 +1987,7 @@ def mon():
       if n==4:                                                             # once per panel start / update
         threading.Thread(target=ports_sync,daemon=True).start(); sshd_deny_sync()
       if n%20==0:                                                          # every minute: history + Telegram alerts
-        stunnel_log_trim()
+        prune_auth(); stunnel_log_trim()
         try: alerts_tick(hist_tick())
         except Exception: pass
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
@@ -1896,7 +2151,7 @@ def tls_taken(c=None):
 def tls_reserved(c=None):
   c=c or tls_cfg(); pc=rjson(PORTS,{})
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|sshd_ports()
+  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|set(game_ports())|sshd_ports()
 
 def cert_meta():
   rc,o,_=cmd(["openssl","x509","-in",CERT,"-noout","-subject","-issuer","-enddate"])
@@ -1973,6 +2228,9 @@ def tls_shell_files():
     fp=os.path.join(SHELLS_DIR,"shells."+k)
     with open(fp,"w") as f: f.write("\n".join(clean+[SHELLS[(tm,"both")],SHELLS[(tm,cx)]])+"\n")
     os.chmod(fp,0o644)
+  fp=os.path.join(SHELLS_DIR,"shells.game")                      # game instance: game accounts only
+  with open(fp,"w") as f: f.write("\n".join(clean+[SHELLS[("direct","game")]])+"\n")
+  os.chmod(fp,0o644)
 
 def stunnel_write(c):
   L=["; generated by the CK.VPN panel - changes are overwritten","foreground = yes","pid =","debug = 5","output = "+STUNLOG,"sslVersionMin = TLSv1.2",
@@ -2457,7 +2715,7 @@ def tpl_save(d):
   name=str(d.get("name","")).strip()[:40]
   if not name: return 400,{"ok":0,"msg":"Template name required"}
   t={"name":name,"d":max(1,int(float(d.get("d") or 30))),"q":max(0.0,float(d.get("q") or 0)),"l":max(1,int(float(d.get("l") or 1))),
-     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct","cx":d.get("cx") if d.get("cx") in ("normal","tls") else "both"}
+     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct","cx":d.get("cx") if d.get("cx") in ("normal","tls","game") else "both"}
   ls=[x for x in tpl_list() if x.get("name")!=name]+[t]; wjson(TPL,ls[:60]); return 200,{"ok":1}
 
 def tpl_del(d):
@@ -2469,7 +2727,7 @@ def user_bulk(d):
   prefix=str(d.get("prefix","")).strip()
   try: count=int(d.get("count",0)); start=int(d.get("start",1) or 1)
   except Exception: return 400,{"ok":0,"msg":"Invalid count"}
-  if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,20}$",prefix): return 400,{"ok":0,"msg":"Invalid prefix (letters/digits, max 21 chars)"}
+  if not re.match(r"^[A-Za-z_][A-Za-z0-9_-]{0,20}\Z",prefix): return 400,{"ok":0,"msg":"Invalid prefix (letters/digits, max 21 chars)"}
   if not 1<=count<=200: return 400,{"ok":0,"msg":"Count must be 1..200"}
   same=str(d.get("pw","")).strip(); width=len(str(start+count-1)); made=[]; errs=[]
   for i in range(count):
@@ -2481,7 +2739,7 @@ def user_bulk(d):
 
 # ---- 6) subscription links and QR codes
 def sub_find(tok):
-  if not re.match(r"^[0-9a-f]{24}$",str(tok)): return None
+  if not re.match(r"^[0-9a-f]{24}\Z",str(tok)): return None
   for u,m in rjson(META,{}).items():
     if m.get("tok")==tok and u in user_uid_map(): return u
   return None
@@ -2491,14 +2749,15 @@ def sub_data(u,hosthdr):
   if not x: return None
   tc=tunnel_status(False); pc=rjson(PORTS,{}); out=x["tm"]=="tunnel"; inB=x.get("en")=="B" and tc["conf"]
   host=tc["host"] if inB else re.sub(r":\d+$","",hosthdr or "")
-  dbl=list(pc.get("tdb" if out else "db",[]))
+  dbl=list(pc.get("tdb" if out else "db",[])) if x.get("cx")!="game" else game_ports()
   if inB:
     mp={r["a"]:r["b"] for r in tc["rev_map"]}; s2=pc.get("ssh2") or 0
     ssh=[mp[s2]] if s2 in mp else []; dbl=[mp[p] for p in dbl if p in mp]
   else: ssh=sorted(sshd_ports())
+  if x.get("cx")=="game": ssh=[]                                     # a game account is meant for the game port only
   x.update({"host":host,"ssh":ssh,"db":dbl,"in":"B" if inB else "A","out":"B" if out else "A","exit":(tc["exit"] or tc["host"]) if out else host})
   tl=tls_cfg(); x["tls"]=None
-  if tl["on"] and x.get("cx","both")!="normal":                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
+  if tl["on"] and x.get("cx","both") not in ("normal","game"):                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
     tp=list(tl["tports" if out else "ports"])
     if inB: mp2={r["a"]:r["b"] for r in tc["rev_map"]}; tp=[mp2[p] for p in tp if p in mp2]
     if tp:
@@ -2630,6 +2889,59 @@ def hist_get():
   return {"s":h.get("s",[]),"d":{k:h["d"][k] for k in days}}
 
 # ---------- HTTP ----------
+import ipaddress
+def req_len(raw,path):
+  # Content-Length of a request body: (bytes, 0) or (0, http status). Negative / non-numeric / oversize bodies are refused before reading
+  try: n=int(str(raw if raw is not None else "0").strip())
+  except ValueError: return 0,400
+  if n<0: return 0,400
+  if n>(32<<20 if path=="/api/restore" else 1<<20): return 0,413
+  return n,0
+
+def ip_allowed(ip,allow):
+  # panel IP allowlist: empty list = everybody
+  if not allow: return True
+  try:
+    a=ipaddress.ip_address(str(ip).split("%")[0])
+    if a.version==6 and a.ipv4_mapped: a=a.ipv4_mapped
+  except ValueError: return False
+  for n in allow:
+    try:
+      if a in ipaddress.ip_network(str(n),strict=False): return True
+    except ValueError: continue
+  return False
+
+def allow_parse(items):
+  out=[]
+  for x in items[:200]:
+    x=str(x).strip()
+    if not x: continue
+    try: n=str(ipaddress.ip_network(x,strict=False))
+    except ValueError: raise ValueError(x[:60])
+    if n not in out: out.append(n)
+  if len(out)>50: raise ValueError("max 50 entries")
+  return out
+
+def allow_save(d,me):
+  raw=d.get("list",[])
+  if isinstance(raw,str): raw=re.split(r"[\s,;]+",raw)
+  if not isinstance(raw,list): return 400,{"ok":0,"msg":"Invalid list"}
+  try: lst=allow_parse(raw)
+  except ValueError as e: return 400,{"ok":0,"msg":"Invalid address: "+str(e)}
+  if lst and not ip_allowed(me,lst): return 400,{"ok":0,"msg":"Your own address ("+me+") must be in the list, otherwise you would lock yourself out"}
+  c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"}); c["allow"]=lst; wjson(CFG,c)
+  return 200,{"ok":1,"list":lst}
+
+def prune_auth():
+  now=time.time()
+  for t in [k for k,v in list(TOK.items()) if v<=now]: TOK.pop(t,None)
+  for k in list(FAIL):
+    FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
+    if not FAIL[k]: FAIL.pop(k,None)
+
+def cli_allow_off():
+  c=rjson(CFG,{}); c["allow"]=[]; wjson(CFG,c); print("IP allowlist cleared: the panel accepts every address again."); return 0
+
 class Srv(ThreadingHTTPServer):
   allow_reuse_address=True; daemon_threads=True; request_queue_size=64; ctx=None
   def finish_request(s,request,client_address):
@@ -2645,7 +2957,7 @@ class Srv(ThreadingHTTPServer):
           host=re.sub(r"[^A-Za-z0-9.:\[\]-]","",host) or "localhost"
           request.sendall(("HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"%host).encode())
           return
-        request.settimeout(None)
+        request.settimeout(30)                   # idle timeout per read: a stalled client can no longer hold a thread forever
       s.RequestHandlerClass(request,client_address,s)
     except Exception: pass
     finally:
@@ -2653,7 +2965,11 @@ class Srv(ThreadingHTTPServer):
       except Exception: pass
 
 class H(BaseHTTPRequestHandler):
+  timeout=30
   def log_message(s,*a): pass
+  def blocked(s,p):
+    if p.startswith("/s/"): return False                      # public subscription links stay reachable for users' apps
+    return not ip_allowed(s.client_address[0],rjson(CFG,{}).get("allow") or [])
   def js(s,d,c=200):
     b=json.dumps(d).encode("utf-8")
     s.send_response(c); s.send_header("Content-Type","application/json; charset=utf-8")
@@ -2668,6 +2984,7 @@ class H(BaseHTTPRequestHandler):
   def do_GET(s):
     try:
       p=urlparse(s.path).path
+      if s.blocked(p): s.js({"err":3},403); return
       if p in ("/","/index.html"):
         b=open(HTML,"rb").read()
         s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
@@ -2693,6 +3010,10 @@ class H(BaseHTTPRequestHandler):
         u=parse_qs(urlparse(s.path).query).get("u",[""])[0]; x=sub_data(u,s.headers.get("Host",""))
         if not x: s.js({"err":404},404); return
         s.js({"ssh":ssh_uris(x),"sshb":ssh_uris(x,True),"plain_sub":bool(rjson(CFG,{}).get("plain_sub")),"tlsinfo":tls_manual_text(x)}); return
+      if p=="/api/allow": s.js({"list":rjson(CFG,{}).get("allow") or [],"me":s.client_address[0]}); return
+      if p=="/api/game": s.js(game_state()); return
+      if p=="/api/netmon": s.js(netmon_state()); return
+      if p=="/api/netmon/sessions": s.js(net_sessions()); return
       if p=="/api/history": s.js(hist_get()); return
       if p=="/api/telegram": s.js(tg_state()); return
       if p=="/api/templates": s.js(tpl_list()); return
@@ -2710,7 +3031,10 @@ class H(BaseHTTPRequestHandler):
       except Exception: pass
   def do_POST(s):
     try:
-      p=urlparse(s.path).path; ln=int(s.headers.get("Content-Length",0))
+      p=urlparse(s.path).path
+      if s.blocked(p): s.js({"err":3},403); return
+      ln,le=req_len(s.headers.get("Content-Length"),p)
+      if le: s.js({"err":le},le); return
       try: d=json.loads(s.rfile.read(ln).decode("utf-8")) if ln>0 else {}
       except Exception: d={}
       if p=="/api/login":
@@ -2755,6 +3079,10 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/user/del": c,r=user_del(d); s.js(r,c)
       elif p=="/api/ports": c,r=apply_ports(d); s.js(r,c)
       elif p=="/api/badvpn": c,r=save_bv(d); s.js(r,c)
+      elif p=="/api/netmon/save": c,r=netmon_save(d); s.js(r,c)
+      elif p=="/api/game": c,r=game_apply(bool(d.get("on"))); s.js(r,c)
+      elif p=="/api/game/sshd": c,r=game_sshd_apply(d); s.js(r,c)
+      elif p=="/api/bbr" and rjson(GAMEF,{}).get("on"): s.js({"ok":0,"msg":"Game Profile controls BBR and the queue discipline; turn it off first"},400)
       elif p=="/api/bbr":
         ok,msg=bbr_set(bool(d.get("on")))
         s.js({"ok":1 if ok else 0,"msg":msg,"bbr":bbr_state()},200 if ok else 400)
@@ -2765,6 +3093,7 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/tunnel/restart": c,r=tunnel_restart(); s.js(r,c)
       elif p=="/api/tunnel/test": c,r=tunnel_test(); s.js(r,c)
       elif p=="/api/tunnel/remove": c,r=tunnel_remove(); s.js(r,c)
+      elif p=="/api/allow": c,r=allow_save(d,s.client_address[0]); s.js(r,c)
       elif p=="/api/admin":
         c=rjson(CFG,{"port":2053,"username":"admin","password":"admin"})
         au=str(d.get("u","")).strip() or str(c.get("username","admin")).strip()
@@ -2772,6 +3101,7 @@ class H(BaseHTTPRequestHandler):
         if must_change() and (len(ap)<8 or ap=="admin"): s.js({"ok":0,"msg":"New password must be at least 8 characters and not 'admin'"},400); return
         if len(au)>=2 and len(ap)>=2:
           c["username"]=au; c["password"]=ap; wjson(CFG,c)
+          TOK.clear()                                                     # a changed password signs out every other session
           t=secrets.token_hex(16); TOK[t]=time.time()+86400
           s.js({"ok":1,"u":au,"p":ap,"tok":t})
         else: s.js({"ok":0,"msg":"Min 2 chars"},400)
@@ -2793,10 +3123,12 @@ def cli_tunnel_setup(host,port,user,mode="ssh"):
 if __name__=="__main__":
   if len(sys.argv)>=5 and sys.argv[1]=="--tunnel-setup": sys.exit(cli_tunnel_setup(sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5] if len(sys.argv)>5 else "ssh"))
   if len(sys.argv)>=3 and sys.argv[1]=="--cert-renewed": sys.exit(cli_cert_renewed(sys.argv[2]))
+  if len(sys.argv)>=2 and sys.argv[1]=="--allow-off": sys.exit(cli_allow_off())
   open(DB,"a").close()
   try: migrate_secrets()
   except Exception: pass
   threading.Thread(target=mon,daemon=True).start()
+  threading.Thread(target=netmon_loop,daemon=True).start()
   threading.Thread(target=tg_poll,daemon=True).start()
   c=rjson(CFG,{})
   srv=Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H); SRV[0]=srv  # nosec B104 - the panel is meant to be reachable
@@ -2886,7 +3218,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
-  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select>
+  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select>
   <div id="eCx" style="font-size:.76rem;color:var(--wn);margin:-.4rem 0 .5rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
   <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
@@ -2939,7 +3271,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -2961,7 +3293,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
-      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
     </div>
     <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
@@ -3087,6 +3419,20 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div>
 
 <div id="secH" class="hid">
+  <div class="card"><h3 style="margin-bottom:.5rem;color:var(--pr)">🛰️ مانیتور شبکه</h3>
+    <div id="nmSvc" style="margin-bottom:.6rem"></div>
+    <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-bottom:.6rem">پینگ از همین سرور به هدف‌ها (هر دقیقه ۱۰ بسته). این مسیر «سرور تا هدف» را می‌سنجد و مسیر گوشی تا سرور را نشان نمی‌دهد؛ برای آن جدول نشست‌ها در پایین (RTT از TCP همین سرور) را ببین. جیتر = میانگین اختلاف پاسخ‌های پشت‌سرهم.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.4rem"><input type="checkbox" id="nmOn" style="width:auto;margin:.2rem 0 0" onchange="saveNet()"><span>فعال‌سازی پایش پینگ</span></label>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.6rem"><div style="flex:1;min-width:200px"><label>هدف‌ها (حداکثر ۳، با ویرگول)</label><input id="nmTg" dir="ltr" autocapitalize="none" placeholder="1.1.1.1, 8.8.8.8"></div><button class="btn btn-s" onclick="saveNet()">ذخیره</button></div>
+    <div id="nmSum" style="font-size:.8rem;line-height:1.9;margin-bottom:.4rem"></div>
+    <canvas id="cNm" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin:.2rem 0 .6rem">میانگین RTT به میلی‌ثانیه (۱۲ ساعت گذشته)؛ هر خط یک هدف</div>
+    <canvas id="cNmL" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin:.2rem 0 .8rem">پکت‌لاس به درصد</div>
+    <b style="font-size:.85rem">نشست‌های متصل (RTT از TCP همین سرور)</b>
+    <div id="nmSessSum" style="font-size:.76rem;color:var(--mu);margin:.3rem 0"></div>
+    <div style="overflow-x:auto"><table class="t" id="nmSess" style="font-size:.76rem"></table></div>
+  </div>
   <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🌐 وضعیت تانل (۲۴ ساعت گذشته)</h3>
     <div id="hTunSum" style="font-size:.82rem;color:var(--mu);margin-bottom:.4rem"></div><canvas id="cTun" style="width:100%;display:block"></canvas>
     <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده</div></div>
@@ -3097,6 +3443,21 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div>
 
 <div id="secS" class="hid">
+  <div class="card" id="gameCard">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🎮 Game Profile (پینگ پایدار)</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.9;margin-bottom:.6rem">فقط تنظیمات صف و ارسال همین سرور را برای تأخیر کمتر عوض می‌کند: fq به‌جای صف پیش‌فرض، BBR، tcp_notsent_lowat=16384 و tcp_slow_start_after_idle=0. مقدارهای قبلی ذخیره می‌شوند و با خاموش کردن دقیقاً برمی‌گردند. این تنظیمات جیتر مسیر اپراتور گوشی تا سرور را درست نمی‌کنند؛ برای تشخیص آن از «مانیتور شبکه» استفاده کن.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.6rem"><input type="checkbox" id="gameOn" style="width:auto;margin:.2rem 0 0" onchange="gameToggle()"><span>فعال‌سازی Game Profile</span></label>
+    <div id="gameKeys" style="font-size:.76rem;line-height:1.9;direction:ltr;text-align:left;margin-bottom:.4rem"></div>
+    <div id="gameNotes" style="font-size:.76rem;color:var(--wn);line-height:1.8;margin-bottom:.6rem"></div>
+    <div style="border-top:1px solid var(--bd);padding-top:.7rem;margin-top:.4rem">
+      <b style="font-size:.85rem">تنظیمات OpenSSH (اختیاری)</b>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin:.4rem 0">Compression no و UseDNS no در sshd فقط به‌صورت سراسری ممکن‌اند و روی همه‌ی پورت‌های SSH (پورت اصلی شما هم) اثر می‌گذارند. IPQoS lowdelay فقط روی پورت‌های SSH همین پنل اعمال می‌شود. اعمال، sshd را reload می‌کند (نشست‌های باز قطع نمی‌شوند). Dropbear به این تنظیمات ربطی ندارد.</div>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameSshd" style="width:auto;margin:.2rem 0 0"><span>اعمال Compression no، UseDNS no و IPQoS lowdelay روی OpenSSH</span></label>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameCip" style="width:auto;margin:.2rem 0 0"><span>فقط رمزهای سبک chacha20-poly1305 و aes128-gcm (روی همه‌ی پورت‌های OpenSSH؛ کلاینت‌های قدیمی ممکن است وصل نشوند)</span></label>
+      <button class="btn btn-s btn-w" onclick="gameSshdApply()">اعمال روی OpenSSH (sshd را reload می‌کند)</button>
+    </div>
+  </div>
+
   <div class="g2">
     <div class="card">
       <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 BBR (کنترل ازدحام TCP)</h3>
@@ -3137,6 +3498,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>Tunnel DB 2</label><input id="td2" type="number"></div>
       <div><label>Tunnel DB 3</label><input id="td3" type="number"></div>
       <div><label>Tunnel DB 4</label><input id="td4" type="number"></div>
+      <div><label>Game DB 1 (اکانت‌های Game)</label><input id="gd1" type="number"></div>
+      <div><label>Game DB 2</label><input id="gd2" type="number"></div>
     </div>
     <button class="btn btn-s" onclick="savePorts()">ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)</button>
     <h3 style="margin:1.2rem 0 .6rem">🎮 BadVPN UDPGW</h3>
@@ -3145,6 +3508,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>UDP MTU</label><input id="bm" type="number"></div>
       <div><label>Max Clients</label><input id="bc" type="number"></div>
       <div><label>Max Conn / Client</label><input id="bn" type="number"></div>
+      <div><label>Send buffer (بایت، ۰ = پیش‌فرض)</label><input id="bs" type="number" min="0" max="16777216"></div>
       <div><label>Bind</label><select id="bb"><option value="127.0.0.1">127.0.0.1 (امن)</option><option value="0.0.0.0">0.0.0.0 (عمومی)</option></select></div>
     </div>
     <button class="btn btn-s btn-w" onclick="saveBv()">ذخیره و ری‌استارت BadVPN</button>
@@ -3158,6 +3522,15 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.2rem"><input type="checkbox" id="plainSub" style="width:auto;margin:.2rem 0 0" onchange="savePlainSub()"><span>اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)</span></label>
     <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin:0 0 .8rem">⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.</div>
     <button class="btn btn-s" onclick="swTab('l')">🔒 رفتن به تب TLS و دامنه</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🛡️ آدرس‌های مجاز برای ورود به پنل</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">فقط این آدرس‌ها (یا محدوده‌ها مثل 203.0.113.0/24) به پنل می‌رسند؛ خالی یعنی همه. هر آدرس در یک خط یا جدا با ویرگول. آدرس فعلی خودت باید در لیست باشد. لینک‌های اشتراک کاربران همیشه باز می‌مانند.</div>
+    <textarea id="alwList" rows="3" dir="ltr" autocapitalize="none" placeholder="203.0.113.7"></textarea>
+    <div id="alwMe" style="font-size:.76rem;color:var(--mu);margin:.3rem 0 .6rem;direction:ltr;text-align:left"></div>
+    <button class="btn btn-s" onclick="saveAllow()">ذخیره‌ی آدرس‌های مجاز</button>
+    <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin-top:.6rem">اگر قفل شدی، روی سرور بزن: <code>python3 /opt/sshplus-panel/app.py --allow-off</code></div>
   </div>
 
   <div class="card">
@@ -3202,7 +3575,7 @@ const $=id=>document.getElementById(id);
 // ---- language: fa (default) / en. Static labels: EN dictionary; paragraphs: data-th blocks; JS sentences: L(fa,en)
 let LANG="fa"; try{LANG=localStorage.getItem("lang")==="en"?"en":"fa"}catch(e){}
 const L=(fa,en)=>LANG==="en"?en:fa;
-const EN={"👥 کاربران": "👥 Users", "🌐 تانل": "🌐 Tunnel", "📈 آمار": "📈 Statistics", "⚙️ تنظیمات سرور": "⚙️ Server settings", "ورود / Login": "Login", "بستن": "Close", "ذخیره": "Save", "💾 ذخیره": "💾 Save", "ذخیره و ادامه": "Save and continue", "(ذخیره شده)": "(saved)", "وضعیت": "Status", "نوع": "Type", "فعال": "Active", "غیرفعال": "Disabled", "آنلاین / کل کاربران": "Online / Total users", "تانل / Dropbear تانل": "Tunnel / Tunnel Dropbear", "BBR / منابع": "BBR / Resources", "🔌 پورت‌های فعال:": "🔌 Active ports:", "رمز عبور": "Password", "🔐 تغییر رمز پیش‌فرض": "🔐 Change the default password", "رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).": "The default password (admin) is not secure. Choose a new one to continue (at least 8 characters).", "رمز جدید": "New password", "تکرار رمز": "Repeat password", "➕ ساخت کاربر جدید": "➕ Create new user", "قالب:": "Template:", "— بدون قالب —": "— No template —", "💾 ذخیره فرم به‌عنوان قالب": "💾 Save form as template", "نام کاربری (انگلیسی)": "Username (English letters)", "پورت پیشنهادی": "Suggested port", "پورت پیشنهادی (فقط برای نمایش/کپی)": "Suggested port (display/copy only)", "حجم (GB | 0=نامحدود)": "Quota (GB | 0 = unlimited)", "روز اعتبار": "Validity (days)", "کاربر همزمان": "Concurrent users", "— به کدام سرور وصل شود": "— which server the user connects to", "— با IP کدام سرور خارج شود": "— whose IP the user leaves with", "سرور ۱": "Server 1", "سرور ۲": "Server 2", "سرور ۱ (این سرور)": "Server 1 (this server)", "سرور ۲ (سرور تانل)": "Server 2 (tunnel server)", "سرور ۲ (تانل نصب نیست)": "Server 2 (tunnel not installed)", "ایجاد اکانت": "Create account", "همه پورت‌ها": "All ports", "📦 ساخت دسته‌ای اکانت": "📦 Bulk account creation", "پیشوند نام": "Name prefix", "تعداد (۱ تا ۲۰۰)": "Count (1 to 200)", "شروع شماره": "Start number", "رمز (خالی = تصادفی برای هر اکانت)": "Password (empty = random per account)", "ایجاد اکانت‌ها": "Create accounts", "📋 لیست کاربران": "📋 Users", "📋 کپی": "📋 Copy", "⬇️ دانلود CSV": "⬇️ Download CSV", "ویرایش کاربر": "Edit user", "رمز جدید (خالی = بدون تغییر)": "New password (empty = unchanged)", "تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر": "Renew: validity from today (days) — empty/0 = unchanged", "صفر کردن ترافیک مصرفی": "Reset used traffic", "با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.": "Changing In/Out cuts this user's active connections.", "لینک اشتراک و QR": "Subscription link & QR", "📋 کپی لینک اشتراک": "📋 Copy subscription link", "🔗 باز کردن": "🔗 Open", "🌐 وضعیت تانل": "🌐 Tunnel status", "🚀 نصب و اتصال تانل (یک کلیک)": "🚀 Install & connect the tunnel (one click)", "IP یا دامنه‌ی سرور جدید (خروجی)": "IP or domain of the new (exit) server", "پورت SSH": "SSH port", "کاربر (باید root باشد)": "User (must be root)", "رمز SSH سرور جدید": "SSH password of the new server", "⚡ نصب و برقراری تانل": "⚡ Install & connect the tunnel", "♻️ نصب مجدد / تغییر سرور": "♻️ Reinstall / change server", "⏳ در حال نصب...": "⏳ Installing...", "🔍 تست خروجی": "🔍 Test exit", "🔄 ری‌استارت تانل": "🔄 Restart tunnel", "🗑️ حذف تانل": "🗑️ Remove tunnel", "تانل نصب نشده": "Tunnel not installed", "🟢 متصل": "🟢 Connected", "🔴 قطع / در حال اتصال": "🔴 Down / connecting", "هنوز تانلی تنظیم نشده. فرم کناری را پر کن.": "No tunnel is configured yet. Fill in the form beside this.", "↔️ مسیر دوطرفه (همیشه فعال)": "↔️ Two-way routing (always on)", "🔌 هماهنگی پورت‌ها و فایروال دو سرور": "🔌 Port coordination & firewalls (both servers)", "پورت سرور ۱": "Port on server 1", "پورت روی سرور ۲": "Port on server 2", "Dropbear تانل": "Tunnel Dropbear", "SSH دوم": "2nd SSH", "هم‌شماره": "Same number", "جابه‌جا شد (مشغول بود)": "Moved (port was busy)", "منتشر نشد": "Not published", "هنوز پورتی منتشر نشده": "No port published yet", "اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.": "If another program has taken this server's Dropbear port, it is replaced by a free one automatically. If a port is busy on server 2, it is published there under another number (this server's ports and existing client configs do not change). The firewall (ufw or firewalld) of both servers is opened for the ports. The same check also runs automatically on every panel start, tunnel install and port change.", "🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور": "🔍 Check & fix conflicts + update the firewalls of both servers", "📜 مراحل نصب": "📜 Installation steps", "هنوز نصبی انجام نشده.": "No installation has been run yet.", "🌐 وضعیت تانل (۲۴ ساعت گذشته)": "🌐 Tunnel status (last 24 hours)", "خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده": "Blue line: latency (ms) · red bar: the tunnel was down", "🖥️ بار سرور (۲۴ ساعت)": "🖥️ Server load (24 h)", "آبی: CPU · نارنجی: RAM": "Blue: CPU · orange: RAM", "📊 مصرف روزانه‌ی کل (۱۴ روز)": "📊 Total daily traffic (14 days)", "🏆 پرمصرف‌ترین کاربران (۷ روز)": "🏆 Top users (7 days)", "تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).": "No tunnel configured or no sample recorded yet (one sample per minute).", "هنوز داده‌ای ثبت نشده": "No data recorded yet", "داده‌ای ثبت نشده": "No data recorded", "🚀 BBR (کنترل ازدحام TCP)": "🚀 BBR (TCP congestion control)", "الگوریتم فعلی": "Current algorithm", "کرنل پشتیبانی نمی‌کند": "Kernel does not support it", "⛔ خاموش کردن BBR": "⛔ Turn BBR off", "🚀 روشن کردن BBR": "🚀 Turn BBR on", "روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.": "Applies to new connections; existing connections keep the previous algorithm until they reconnect.", "👤 نام کاربری و رمز ادمین پنل": "👤 Panel admin username & password", "نام کاربری ادمین": "Admin username", "رمز جدید ادمین": "New admin password", "🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)": "🔌 OpenSSH & Dropbear ports (max 6)", "پورت SSH دوم": "Second SSH port", "پورت SSH اصلی (پنل)": "Main SSH port (panel)", "🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)": "🌐 Dropbear ports for tunnel accounts (max 4)", "ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)": "Save ports (Dropbear connections are briefly dropped)", "پورت (TCP داخل تونل)": "Port (TCP inside the tunnel)", "0.0.0.0 (عمومی)": "0.0.0.0 (public)", "127.0.0.1 (امن)": "127.0.0.1 (safe)", "ذخیره و ری‌استارت BadVPN": "Save and restart BadVPN", "🔒 HTTPS و گواهی": "🔒 HTTPS & certificate", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.": "The panel is served over HTTPS on this port (an old http address is redirected to https automatically). The default certificate is self-signed, so the browser warns. If you have a domain, put a valid certificate (for example from Let's Encrypt) here.", "گواهی (fullchain، فرمت PEM)": "Certificate (fullchain, PEM format)", "کلید خصوصی (PEM)": "Private key (PEM)", "آپلود گواهی": "Upload certificate", "💾 بکاپ و بازیابی": "💾 Backup & restore", "کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.": "Users, quotas, settings, ports, the tunnel key and Telegram in one encrypted file. Do not lose the passphrase; without it the file cannot be restored.", "پسفریز (حداقل ۶ کاراکتر)": "Passphrase (at least 6 characters)", "⬇️ دانلود بکاپ": "⬇️ Download backup", "بازیابی از فایل بکاپ (.ckbk)": "Restore from backup file (.ckbk)", "⬆️ بازیابی (پنل ری‌استارت می‌شود)": "⬆️ Restore (the panel restarts)", "🤖 ربات و هشدار تلگرام": "🤖 Telegram bot & alerts", "توکن ربات": "Bot token", "پسفریز بکاپ خودکار": "Automatic backup passphrase", "ساعت بکاپ روزانه (۰ تا ۲۳)": "Daily backup hour (0 to 23)", "قطع/وصل تانل": "Tunnel down/up", "۹۰٪ و پر شدن حجم": "90% and quota full", "نزدیک/پایان انقضا": "Expiry near/reached", "فشار CPU/RAM": "High CPU/RAM load", "بکاپ روزانه به تلگرام": "Daily backup to Telegram", "📨 پیام آزمایشی": "📨 Test message", "🔎 پیدا کردن Chat ID": "🔎 Find Chat ID", "💾 ارسال بکاپ همین حالا": "💾 Send a backup now", "ℹ️ نحوه‌ی کار": "ℹ️ How it works", "رمز باید حداقل ۸ کاراکتر و غیر از admin باشد": "The password must be at least 8 characters and not 'admin'", "تکرار رمز یکسان نیست": "The passwords do not match", "تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید": "Too many failed attempts; wait 5 minutes", "نام کاربری یا رمز عبور اشتباه است": "Wrong username or password", "پورت‌ها ذخیره شد": "Ports saved", "BadVPN به‌روز شد": "BadVPN updated", "نام کاربری یا رمز جدید را وارد کنید": "Enter a new username or password", "مشخصات ورود تغییر کرد": "Login details changed", "IP و رمز سرور جدید را وارد کن": "Enter the IP and password of the new server", "گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)": "New certificate activated (new connections will use it)", "پسفریز حداقل ۶ کاراکتر": "The passphrase must be at least 6 characters", "فایل بکاپ را انتخاب کن": "Choose the backup file", "پسفریز را وارد کن": "Enter the passphrase", "بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟": "Restore will overwrite the current settings and users. Continue?", "ذخیره شد": "Saved", "پیام ارسال شد": "Message sent", "ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن": "Not sent: check the token/Chat ID or the connection to Telegram (direct and through the tunnel)", "پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن": "No message found. First send /start to the bot, then try again", "بکاپ به تلگرام ارسال شد": "Backup sent to Telegram", "نام قالب:": "Template name:", "پیشوند نام را وارد کن": "Enter a name prefix", "⏳ در حال ساخت...": "⏳ Creating...", "لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن": "The link has not been created yet; try again in a few seconds", "QR در دسترس نیست": "QR unavailable", "ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین": "Restarted; check the status in a few seconds", "تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند.": "Remove the tunnel? Tunnel accounts will become “Direct”.", "✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.": "✔ The tunnel is up. In “Create new user” choose “Server 2” for Out.", "✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.": "✖ Installation failed; no change was made to existing users.", "تانل سالم است": "Tunnel is healthy", "بررسی ابزارهای لازم": "Checking the required tools", "ساخت کلید SSH مخصوص تانل": "Creating the tunnel's SSH key", "تست ورود با کلید": "Testing the key login", "آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)": "Preparing the exit server (PermitTunnel / forwarding / NAT)", "راه‌اندازی تانل روی این سرور": "Starting the tunnel on this server", "انتظار برای برقراری تانل": "Waiting for the tunnel to come up", "تست خروجی اینترنت از مسیر تانل": "Testing internet access through the tunnel", "خطای داخلی": "Internal error", "رمز عبور یا نام کاربری اشتباه است (wrong password/user)": "Wrong password or username", "کاربر باید root باشد (برای ساخت کارت شبکه تانل)": "The user must be root (needed to create the tunnel network device)", "کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)": "SSH key installed on the exit server (the password is not stored)", "PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد": "PermitTunnel + ip_forward + NAT enabled on the exit server", "تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)": "The tunnel is up but the internet test through it got no answer (does the exit server have internet?)", "📋 لینک اشتراک (برای برنامه‌ها)": "📋 Subscription link (for apps)", "📋 متن ساده": "📋 Plain-text list", "📋 لینک SSH": "📋 SSH link", "📋 لینک SSH (base64)": "📋 SSH link (base64 login)", "🔗 باز کردن صفحه": "🔗 Open the page", "اگر برنامه‌ی تانل لینک را نپذیرفت، یکی از حالت‌های دیگر را امتحان کن. برنامه‌هایی که گواهی self-signed را رد می‌کنند به گواهی معتبر نیاز دارند، یا لینک اشتراک را روی HTTP ساده فعال کن (تنظیمات ← HTTPS).": "If a tunnel app does not accept the link, try one of the other formats. Apps that reject a self-signed certificate need a valid certificate, or enable the subscription link over plain HTTP (Settings → HTTPS).", "اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)": "Allow the subscription link over plain HTTP (for apps that do not accept a self-signed certificate)", "⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.": "⚠️ The account password is inside the link and can be sniffed on the way over plain HTTP. Turn it on only if you need it; the rest of the panel always stays HTTPS.", "🔒 TLS و دامنه": "🔒 TLS & Domain", "نوع اتصال": "Connection type", "فقط TLS": "TLS only", "🔒 SSH روی TLS": "🔒 SSH over TLS", "فعال‌سازی SSH روی TLS": "Enable SSH over TLS", "پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)": "TLS port(s) for normal accounts (comma-separated)", "پورت(های) TLS اکانت‌های تانل": "TLS port(s) for tunnel accounts", "💾 ذخیره‌ی پورت‌ها": "💾 Save ports", "📜 گواهی فعلی": "📜 Current certificate", "↩️ بازگشت به گواهی self-signed": "↩️ Back to a self-signed certificate", "🌍 دامنه و گواهی (یک‌کلیک)": "🌍 Domain and certificate (one click)", "منبع دامنه": "Domain source", "دامنه‌ی رایگان (خودکار)": "Free domain (automatic)", "دامنه‌ی خودم را دارم": "I have my own domain", "ایمیل (اختیاری؛ برای هشدار انقضا از Let's Encrypt)": "E-mail (optional; Let's Encrypt expiry warnings)", "سرویس دامنه‌ی رایگان": "Free-domain service", "sslip.io — بدون ثبت‌نام": "sslip.io — no sign-up", "nip.io — بدون ثبت‌نام": "nip.io — no sign-up", "DuckDNS — زیردامنه‌ی ثابت (حساب رایگان لازم است)": "DuckDNS — fixed sub-domain (free account needed)", "سرویس wildcard-DNS دیگر (خودت وارد کن)": "Another wildcard-DNS service (enter it yourself)", "نام زیردامنه در DuckDNS": "DuckDNS sub-domain name", "توکن DuckDNS": "DuckDNS token", "پسوند سرویس (مثلاً sslip.io)": "Service suffix (e.g. sslip.io)", "دامنه‌ی شما": "Your domain", "⚡ دریافت دامنه و گواهی": "⚡ Get domain and certificate", "⏳ در حال دریافت...": "⏳ Working...", "⬆️ آپلود گواهی دلخواه (PEM)": "⬆️ Upload your own certificate (PEM)", "دامنه‌ی این گواهی (برای لینک‌ها و SNI)": "Domain of this certificate (used in links and SNI)", "🔒 رفتن به تب TLS و دامنه": "🔒 Go to the TLS & Domain tab", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی و دامنه در تب «TLS و دامنه» مدیریت می‌شود (یک گواهی برای HTTPS پنل و SSH روی TLS)؛ گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد.": "The panel uses HTTPS on this same port (an old http address redirects to https automatically). The certificate and domain are managed in the “TLS & Domain” tab (one certificate for the panel's HTTPS and for SSH over TLS); the default certificate is self-signed and the browser shows a warning.", "خاموش": "Off", "🟢 فعال": "🟢 Active", "🔴 سرویس بالا نیست": "🔴 Service is not running", "دامنه را وارد کن": "Enter the domain", "به گواهی self-signed برگردیم؟ دامنه‌ی فعلی پاک می‌شود.": "Go back to a self-signed certificate? The current domain will be cleared.", "معمولی + TLS": "Normal + TLS", "فقط معمولی": "Normal only", "🔄 تمدید گواهی": "🔄 Renew certificate", "گواهی همین حالا از Let's Encrypt دوباره صادر شود؟ (تمدید خودکار هم هر روز بررسی می‌شود؛ این دکمه برای تمدید فوری است.)": "Re-issue the certificate from Let's Encrypt right now? (Automatic renewal is also checked every day; this button is for an immediate renewal.)", "حداکثر اتصال هم‌زمان از هر IP روی پورت‌های TLS (۰ = بدون محدودیت)": "Max simultaneous connections per IP on the TLS ports (0 = no limit)", "حالت آزمایشی Let's Encrypt (staging): برای امتحان کردن مراحل بدون مصرف سقف؛ گواهی آن معتبر نیست": "Let's Encrypt test mode (staging): to try the steps without using the rate limit; its certificate is not trusted", "📋 مشخصات TLS (ورود دستی)": "📋 TLS details (manual entry)", "نوع تانل": "Tunnel type", "WireGuard — سریع (UDP، پیشنهادی)": "WireGuard — fast (UDP, recommended)", "SSH — سازگار (TCP، کندتر)": "SSH — compatible (TCP, slower)", "⬆️ به‌روزرسانی سرور مقصد": "⬆️ Update exit server"}, ENP=[["ویرایش: {0}", "Edit: {0}"], ["پورت‌های فعال sshd: {0} (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)", "Active sshd ports: {0} (ports defined outside the panel, such as your own main port, are never touched)"], ["دسترس‌پذیری ۲۴ ساعت: {0}٪ · میانگین تأخیر: {1} ms · {2} نمونه قطع", "24 h availability: {0}% · average latency: {1} ms · {2} samples down"], ["بازیابی انجام شد ({0} کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.", "Restore finished ({0} users). The panel restarts in a few seconds; log in again."], ["ارسال نشد: {0}", "Not sent: {0}"], ["قالب «{0}» حذف شود؟", "Delete template “{0}”?"], ["{0} اکانت با پیشوند {1} ساخته شود؟", "Create {0} accounts with prefix {1}?"], ["تانل سالم است. IP خروجی: {0}", "The tunnel is healthy. Exit IP: {0}"], ["تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: {0}", "Tunnel removed. Accounts converted to Direct: {0}"], ["اتصال به {0}:{1} با رمز و نصب کلید", "Connecting to {0}:{1} with the password and installing the key"], ["اتصال SSH برقرار نشد: {0}", "SSH connection failed: {0}"], ["ورود با کلید ناموفق: {0}", "Key login failed: {0}"], ["تداخل پورت روی این سرور رفع شد: {0}", "Port conflicts on this server were fixed: {0}"], ["تانل بالا نیامد: {0}", "The tunnel did not come up: {0}"], ["IP خروجی تانل: {0}", "Tunnel exit IP: {0}"]], HT={"tnNote": "The password is only used to install an SSH key and is not stored; after that the link uses the key.<br>⚠️ If you prefer not to type the server's password into the web page, run this in a terminal on this server:<br><code dir=\"ltr\">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code>", "biNote": "When creating an account the admin has two choices, <bdi dir=\"ltr\"><b>In</b></bdi> and <bdi dir=\"ltr\"><b>Out</b></bdi>: <bdi dir=\"ltr\"><b>In</b></bdi> is which server's IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is which server's IP the user reaches the internet with. All four combinations (<span dir=\"ltr\">1→1</span>, <span dir=\"ltr\">1→2</span>, <span dir=\"ltr\">2→1</span>, <span dir=\"ltr\">2→2</span>) are active and UDPGW (games/calls) works on all of them. No separate mode needs to be configured.", "how": "<bdi dir=\"ltr\"><b>In</b></bdi> is the server whose IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is the server whose IP is seen on the internet. “Server 1” is this server and “Server 2” is the tunnel server.<br>\n    1) When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2”, the traffic goes through the tunnel. This account works on the <b>SSH (OpenSSH)</b> ports and the <b>tunnel Dropbear</b> ports; the normal Dropbear ports are only for accounts whose <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 1”. Ports can be changed in the Settings tab.<br>\n    2) When <bdi dir=\"ltr\"><b>In</b></bdi> is “Server 2”, this server's ports are opened on server 2 and forwarded through the tunnel to this server. Port 22 and any port server 2 itself listens on are never touched, so admin access to both servers and to the panel always stays open. The firewall of server 2 must allow these ports and the real IP of the user is not visible on this server.<br>\n    3) If the tunnel goes down, every path that goes through it is <b>blocked</b> (instead of leaking out through the direct IP). It reconnects automatically.<br>\n    4) UDPGW (games/calls) works on all four combinations. When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2” it goes through the tunnel. The client keeps using <span dir=\"ltr\">127.0.0.1:7300</span>.<br>\n    5) The tunnel runs over SSH (TCP); for better speed keep BBR on for both servers.", "tgNote": "First create a bot in Telegram with @BotFather and paste the token here; then send <span dir=\"ltr\">/start</span> to the bot and press “Find Chat ID”. If Telegram cannot be reached from this server, the panel automatically sends through the tunnel.", "tgCmd": "Bot commands (only from the configured Chat ID): <span dir=\"ltr\">/status /users /online /backup</span>", "tlsNote": "SSH is wrapped inside a TLS connection, for apps or networks that want TLS/SNI.<br>• A “Normal only” account cannot log in on a TLS port, and a “TLS only” account cannot log in on the plain Dropbear ports.<br>• A “TLS only” account is also refused on the OpenSSH ports (such as 22); “Normal only” and “Both” accounts can log in there.<br>• Tunnel accounts have their own TLS port (they exit through the tunnel).<br>• The <span dir=\"ltr\">ssh://</span> link format for TLS is not standardised; if your app does not accept it, enter the address, port and SNI by hand.", "tlsShared": "This same certificate and domain are also used for the panel's own HTTPS; nothing else needs to be set up elsewhere."};
+const EN={"👥 کاربران": "👥 Users", "🌐 تانل": "🌐 Tunnel", "📈 آمار": "📈 Statistics", "⚙️ تنظیمات سرور": "⚙️ Server settings", "ورود / Login": "Login", "بستن": "Close", "ذخیره": "Save", "💾 ذخیره": "💾 Save", "ذخیره و ادامه": "Save and continue", "(ذخیره شده)": "(saved)", "وضعیت": "Status", "نوع": "Type", "فعال": "Active", "غیرفعال": "Disabled", "آنلاین / کل کاربران": "Online / Total users", "تانل / Dropbear تانل": "Tunnel / Tunnel Dropbear", "BBR / منابع": "BBR / Resources", "🔌 پورت‌های فعال:": "🔌 Active ports:", "رمز عبور": "Password", "🔐 تغییر رمز پیش‌فرض": "🔐 Change the default password", "رمز پیش‌فرض (admin) امن نیست. برای ادامه یک رمز جدید انتخاب کن (حداقل ۸ کاراکتر).": "The default password (admin) is not secure. Choose a new one to continue (at least 8 characters).", "رمز جدید": "New password", "تکرار رمز": "Repeat password", "➕ ساخت کاربر جدید": "➕ Create new user", "قالب:": "Template:", "— بدون قالب —": "— No template —", "💾 ذخیره فرم به‌عنوان قالب": "💾 Save form as template", "نام کاربری (انگلیسی)": "Username (English letters)", "پورت پیشنهادی": "Suggested port", "پورت پیشنهادی (فقط برای نمایش/کپی)": "Suggested port (display/copy only)", "حجم (GB | 0=نامحدود)": "Quota (GB | 0 = unlimited)", "روز اعتبار": "Validity (days)", "کاربر همزمان": "Concurrent users", "— به کدام سرور وصل شود": "— which server the user connects to", "— با IP کدام سرور خارج شود": "— whose IP the user leaves with", "سرور ۱": "Server 1", "سرور ۲": "Server 2", "سرور ۱ (این سرور)": "Server 1 (this server)", "سرور ۲ (سرور تانل)": "Server 2 (tunnel server)", "سرور ۲ (تانل نصب نیست)": "Server 2 (tunnel not installed)", "ایجاد اکانت": "Create account", "همه پورت‌ها": "All ports", "📦 ساخت دسته‌ای اکانت": "📦 Bulk account creation", "پیشوند نام": "Name prefix", "تعداد (۱ تا ۲۰۰)": "Count (1 to 200)", "شروع شماره": "Start number", "رمز (خالی = تصادفی برای هر اکانت)": "Password (empty = random per account)", "ایجاد اکانت‌ها": "Create accounts", "📋 لیست کاربران": "📋 Users", "📋 کپی": "📋 Copy", "⬇️ دانلود CSV": "⬇️ Download CSV", "ویرایش کاربر": "Edit user", "رمز جدید (خالی = بدون تغییر)": "New password (empty = unchanged)", "تمدید: اعتبار از امروز (روز) — خالی/۰ = بدون تغییر": "Renew: validity from today (days) — empty/0 = unchanged", "صفر کردن ترافیک مصرفی": "Reset used traffic", "با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.": "Changing In/Out cuts this user's active connections.", "لینک اشتراک و QR": "Subscription link & QR", "📋 کپی لینک اشتراک": "📋 Copy subscription link", "🔗 باز کردن": "🔗 Open", "🌐 وضعیت تانل": "🌐 Tunnel status", "🚀 نصب و اتصال تانل (یک کلیک)": "🚀 Install & connect the tunnel (one click)", "IP یا دامنه‌ی سرور جدید (خروجی)": "IP or domain of the new (exit) server", "پورت SSH": "SSH port", "کاربر (باید root باشد)": "User (must be root)", "رمز SSH سرور جدید": "SSH password of the new server", "⚡ نصب و برقراری تانل": "⚡ Install & connect the tunnel", "♻️ نصب مجدد / تغییر سرور": "♻️ Reinstall / change server", "⏳ در حال نصب...": "⏳ Installing...", "🔍 تست خروجی": "🔍 Test exit", "🔄 ری‌استارت تانل": "🔄 Restart tunnel", "🗑️ حذف تانل": "🗑️ Remove tunnel", "تانل نصب نشده": "Tunnel not installed", "🟢 متصل": "🟢 Connected", "🔴 قطع / در حال اتصال": "🔴 Down / connecting", "هنوز تانلی تنظیم نشده. فرم کناری را پر کن.": "No tunnel is configured yet. Fill in the form beside this.", "↔️ مسیر دوطرفه (همیشه فعال)": "↔️ Two-way routing (always on)", "🔌 هماهنگی پورت‌ها و فایروال دو سرور": "🔌 Port coordination & firewalls (both servers)", "پورت سرور ۱": "Port on server 1", "پورت روی سرور ۲": "Port on server 2", "Dropbear تانل": "Tunnel Dropbear", "SSH دوم": "2nd SSH", "هم‌شماره": "Same number", "جابه‌جا شد (مشغول بود)": "Moved (port was busy)", "منتشر نشد": "Not published", "هنوز پورتی منتشر نشده": "No port published yet", "اگر پورت Dropbear این سرور را برنامه‌ی دیگری گرفته باشد، خودکار با پورت آزاد عوض می‌شود. اگر پورتی روی سرور ۲ مشغول باشد، با شماره‌ی دیگری روی سرور ۲ منتشر می‌شود (پورت‌های این سرور و کانفیگ کلاینت‌های فعلی تغییر نمی‌کنند). فایروال (ufw یا firewalld) هر دو سرور برای پورت‌ها باز می‌شود. همین بررسی خودکار هم با هر راه‌اندازی پنل، نصب تانل و تغییر پورت انجام می‌شود.": "If another program has taken this server's Dropbear port, it is replaced by a free one automatically. If a port is busy on server 2, it is published there under another number (this server's ports and existing client configs do not change). The firewall (ufw or firewalld) of both servers is opened for the ports. The same check also runs automatically on every panel start, tunnel install and port change.", "🔍 بررسی و رفع تداخل + به‌روزرسانی فایروال هر دو سرور": "🔍 Check & fix conflicts + update the firewalls of both servers", "📜 مراحل نصب": "📜 Installation steps", "هنوز نصبی انجام نشده.": "No installation has been run yet.", "🌐 وضعیت تانل (۲۴ ساعت گذشته)": "🌐 Tunnel status (last 24 hours)", "خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده": "Blue line: latency (ms) · red bar: the tunnel was down", "🖥️ بار سرور (۲۴ ساعت)": "🖥️ Server load (24 h)", "آبی: CPU · نارنجی: RAM": "Blue: CPU · orange: RAM", "📊 مصرف روزانه‌ی کل (۱۴ روز)": "📊 Total daily traffic (14 days)", "🏆 پرمصرف‌ترین کاربران (۷ روز)": "🏆 Top users (7 days)", "تانلی تنظیم نشده یا هنوز نمونه‌ای ثبت نشده (هر دقیقه ثبت می‌شود).": "No tunnel configured or no sample recorded yet (one sample per minute).", "هنوز داده‌ای ثبت نشده": "No data recorded yet", "داده‌ای ثبت نشده": "No data recorded", "🚀 BBR (کنترل ازدحام TCP)": "🚀 BBR (TCP congestion control)", "الگوریتم فعلی": "Current algorithm", "کرنل پشتیبانی نمی‌کند": "Kernel does not support it", "⛔ خاموش کردن BBR": "⛔ Turn BBR off", "🚀 روشن کردن BBR": "🚀 Turn BBR on", "روی اتصال‌های جدید اثر می‌گذارد؛ اتصال‌های فعلی تا اتصال مجدد با الگوریتم قبلی می‌مانند.": "Applies to new connections; existing connections keep the previous algorithm until they reconnect.", "👤 نام کاربری و رمز ادمین پنل": "👤 Panel admin username & password", "نام کاربری ادمین": "Admin username", "رمز جدید ادمین": "New admin password", "🔌 پورت‌های OpenSSH و Dropbear (حداکثر ۶ پورت)": "🔌 OpenSSH & Dropbear ports (max 6)", "پورت SSH دوم": "Second SSH port", "پورت SSH اصلی (پنل)": "Main SSH port (panel)", "🌐 پورت‌های Dropbear مخصوص اکانت تانل (حداکثر ۴)": "🌐 Dropbear ports for tunnel accounts (max 4)", "ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)": "Save ports (Dropbear connections are briefly dropped)", "پورت (TCP داخل تونل)": "Port (TCP inside the tunnel)", "0.0.0.0 (عمومی)": "0.0.0.0 (public)", "127.0.0.1 (امن)": "127.0.0.1 (safe)", "ذخیره و ری‌استارت BadVPN": "Save and restart BadVPN", "🔒 HTTPS و گواهی": "🔒 HTTPS & certificate", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد. اگر دامنه داری، گواهی معتبر (مثلاً از Let's Encrypt) را اینجا بگذار.": "The panel is served over HTTPS on this port (an old http address is redirected to https automatically). The default certificate is self-signed, so the browser warns. If you have a domain, put a valid certificate (for example from Let's Encrypt) here.", "گواهی (fullchain، فرمت PEM)": "Certificate (fullchain, PEM format)", "کلید خصوصی (PEM)": "Private key (PEM)", "آپلود گواهی": "Upload certificate", "💾 بکاپ و بازیابی": "💾 Backup & restore", "کاربران، حجم‌ها، تنظیمات، پورت‌ها، کلید تانل و تلگرام در یک فایل رمزنگاری‌شده. پسفریز را گم نکن؛ بدون آن فایل قابل بازیابی نیست.": "Users, quotas, settings, ports, the tunnel key and Telegram in one encrypted file. Do not lose the passphrase; without it the file cannot be restored.", "پسفریز (حداقل ۶ کاراکتر)": "Passphrase (at least 6 characters)", "⬇️ دانلود بکاپ": "⬇️ Download backup", "بازیابی از فایل بکاپ (.ckbk)": "Restore from backup file (.ckbk)", "⬆️ بازیابی (پنل ری‌استارت می‌شود)": "⬆️ Restore (the panel restarts)", "🤖 ربات و هشدار تلگرام": "🤖 Telegram bot & alerts", "توکن ربات": "Bot token", "پسفریز بکاپ خودکار": "Automatic backup passphrase", "ساعت بکاپ روزانه (۰ تا ۲۳)": "Daily backup hour (0 to 23)", "قطع/وصل تانل": "Tunnel down/up", "۹۰٪ و پر شدن حجم": "90% and quota full", "نزدیک/پایان انقضا": "Expiry near/reached", "فشار CPU/RAM": "High CPU/RAM load", "بکاپ روزانه به تلگرام": "Daily backup to Telegram", "📨 پیام آزمایشی": "📨 Test message", "🔎 پیدا کردن Chat ID": "🔎 Find Chat ID", "💾 ارسال بکاپ همین حالا": "💾 Send a backup now", "ℹ️ نحوه‌ی کار": "ℹ️ How it works", "رمز باید حداقل ۸ کاراکتر و غیر از admin باشد": "The password must be at least 8 characters and not 'admin'", "تکرار رمز یکسان نیست": "The passwords do not match", "تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید": "Too many failed attempts; wait 5 minutes", "نام کاربری یا رمز عبور اشتباه است": "Wrong username or password", "پورت‌ها ذخیره شد": "Ports saved", "BadVPN به‌روز شد": "BadVPN updated", "نام کاربری یا رمز جدید را وارد کنید": "Enter a new username or password", "مشخصات ورود تغییر کرد": "Login details changed", "IP و رمز سرور جدید را وارد کن": "Enter the IP and password of the new server", "گواهی جدید فعال شد (اتصال‌های بعدی از آن استفاده می‌کنند)": "New certificate activated (new connections will use it)", "پسفریز حداقل ۶ کاراکتر": "The passphrase must be at least 6 characters", "فایل بکاپ را انتخاب کن": "Choose the backup file", "پسفریز را وارد کن": "Enter the passphrase", "بازیابی تنظیمات و کاربران فعلی را بازنویسی می‌کند. ادامه؟": "Restore will overwrite the current settings and users. Continue?", "ذخیره شد": "Saved", "پیام ارسال شد": "Message sent", "ارسال نشد: توکن/Chat ID یا دسترسی به تلگرام (مستقیم و از مسیر تانل) را بررسی کن": "Not sent: check the token/Chat ID or the connection to Telegram (direct and through the tunnel)", "پیامی پیدا نشد. اول به ربات پیام /start بده و دوباره امتحان کن": "No message found. First send /start to the bot, then try again", "بکاپ به تلگرام ارسال شد": "Backup sent to Telegram", "نام قالب:": "Template name:", "پیشوند نام را وارد کن": "Enter a name prefix", "⏳ در حال ساخت...": "⏳ Creating...", "لینک هنوز ساخته نشده؛ چند ثانیه بعد دوباره امتحان کن": "The link has not been created yet; try again in a few seconds", "QR در دسترس نیست": "QR unavailable", "ری‌استارت شد؛ چند ثانیه بعد وضعیت را ببین": "Restarted; check the status in a few seconds", "تانل حذف شود؟ اکانت‌های تانل به «مستقیم» تبدیل می‌شوند.": "Remove the tunnel? Tunnel accounts will become “Direct”.", "✔ تانل برقرار شد. در «ساخت کاربر» برای Out گزینه‌ی «سرور ۲» را انتخاب کن.": "✔ The tunnel is up. In “Create new user” choose “Server 2” for Out.", "✖ نصب ناموفق بود؛ تغییری روی کاربران فعلی اعمال نشد.": "✖ Installation failed; no change was made to existing users.", "تانل سالم است": "Tunnel is healthy", "بررسی ابزارهای لازم": "Checking the required tools", "ساخت کلید SSH مخصوص تانل": "Creating the tunnel's SSH key", "تست ورود با کلید": "Testing the key login", "آماده‌سازی سرور مقصد (PermitTunnel / فوروارد / NAT)": "Preparing the exit server (PermitTunnel / forwarding / NAT)", "راه‌اندازی تانل روی این سرور": "Starting the tunnel on this server", "انتظار برای برقراری تانل": "Waiting for the tunnel to come up", "تست خروجی اینترنت از مسیر تانل": "Testing internet access through the tunnel", "خطای داخلی": "Internal error", "رمز عبور یا نام کاربری اشتباه است (wrong password/user)": "Wrong password or username", "کاربر باید root باشد (برای ساخت کارت شبکه تانل)": "The user must be root (needed to create the tunnel network device)", "کلید SSH روی سرور مقصد نصب شد (رمز ذخیره نمی‌شود)": "SSH key installed on the exit server (the password is not stored)", "PermitTunnel + ip_forward + NAT روی سرور مقصد فعال شد": "PermitTunnel + ip_forward + NAT enabled on the exit server", "تانل برقرار است ولی تست اینترنت از مسیر تانل جواب نداد (سرور مقصد اینترنت دارد؟)": "The tunnel is up but the internet test through it got no answer (does the exit server have internet?)", "📋 لینک اشتراک (برای برنامه‌ها)": "📋 Subscription link (for apps)", "📋 متن ساده": "📋 Plain-text list", "📋 لینک SSH": "📋 SSH link", "📋 لینک SSH (base64)": "📋 SSH link (base64 login)", "🔗 باز کردن صفحه": "🔗 Open the page", "اگر برنامه‌ی تانل لینک را نپذیرفت، یکی از حالت‌های دیگر را امتحان کن. برنامه‌هایی که گواهی self-signed را رد می‌کنند به گواهی معتبر نیاز دارند، یا لینک اشتراک را روی HTTP ساده فعال کن (تنظیمات ← HTTPS).": "If a tunnel app does not accept the link, try one of the other formats. Apps that reject a self-signed certificate need a valid certificate, or enable the subscription link over plain HTTP (Settings → HTTPS).", "اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)": "Allow the subscription link over plain HTTP (for apps that do not accept a self-signed certificate)", "⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.": "⚠️ The account password is inside the link and can be sniffed on the way over plain HTTP. Turn it on only if you need it; the rest of the panel always stays HTTPS.", "🔒 TLS و دامنه": "🔒 TLS & Domain", "نوع اتصال": "Connection type", "فقط TLS": "TLS only", "🔒 SSH روی TLS": "🔒 SSH over TLS", "فعال‌سازی SSH روی TLS": "Enable SSH over TLS", "پورت(های) TLS اکانت‌های معمولی (با کاما جدا کن)": "TLS port(s) for normal accounts (comma-separated)", "پورت(های) TLS اکانت‌های تانل": "TLS port(s) for tunnel accounts", "💾 ذخیره‌ی پورت‌ها": "💾 Save ports", "📜 گواهی فعلی": "📜 Current certificate", "↩️ بازگشت به گواهی self-signed": "↩️ Back to a self-signed certificate", "🌍 دامنه و گواهی (یک‌کلیک)": "🌍 Domain and certificate (one click)", "منبع دامنه": "Domain source", "دامنه‌ی رایگان (خودکار)": "Free domain (automatic)", "دامنه‌ی خودم را دارم": "I have my own domain", "ایمیل (اختیاری؛ برای هشدار انقضا از Let's Encrypt)": "E-mail (optional; Let's Encrypt expiry warnings)", "سرویس دامنه‌ی رایگان": "Free-domain service", "sslip.io — بدون ثبت‌نام": "sslip.io — no sign-up", "nip.io — بدون ثبت‌نام": "nip.io — no sign-up", "DuckDNS — زیردامنه‌ی ثابت (حساب رایگان لازم است)": "DuckDNS — fixed sub-domain (free account needed)", "سرویس wildcard-DNS دیگر (خودت وارد کن)": "Another wildcard-DNS service (enter it yourself)", "نام زیردامنه در DuckDNS": "DuckDNS sub-domain name", "توکن DuckDNS": "DuckDNS token", "پسوند سرویس (مثلاً sslip.io)": "Service suffix (e.g. sslip.io)", "دامنه‌ی شما": "Your domain", "⚡ دریافت دامنه و گواهی": "⚡ Get domain and certificate", "⏳ در حال دریافت...": "⏳ Working...", "⬆️ آپلود گواهی دلخواه (PEM)": "⬆️ Upload your own certificate (PEM)", "دامنه‌ی این گواهی (برای لینک‌ها و SNI)": "Domain of this certificate (used in links and SNI)", "🔒 رفتن به تب TLS و دامنه": "🔒 Go to the TLS & Domain tab", "پنل روی همین پورت HTTPS است (آدرس http قدیمی خودکار به https می‌رود). گواهی و دامنه در تب «TLS و دامنه» مدیریت می‌شود (یک گواهی برای HTTPS پنل و SSH روی TLS)؛ گواهی پیش‌فرض self-signed است و مرورگر هشدار می‌دهد.": "The panel uses HTTPS on this same port (an old http address redirects to https automatically). The certificate and domain are managed in the “TLS & Domain” tab (one certificate for the panel's HTTPS and for SSH over TLS); the default certificate is self-signed and the browser shows a warning.", "خاموش": "Off", "🟢 فعال": "🟢 Active", "🔴 سرویس بالا نیست": "🔴 Service is not running", "دامنه را وارد کن": "Enter the domain", "به گواهی self-signed برگردیم؟ دامنه‌ی فعلی پاک می‌شود.": "Go back to a self-signed certificate? The current domain will be cleared.", "معمولی + TLS": "Normal + TLS", "فقط معمولی": "Normal only", "🔄 تمدید گواهی": "🔄 Renew certificate", "گواهی همین حالا از Let's Encrypt دوباره صادر شود؟ (تمدید خودکار هم هر روز بررسی می‌شود؛ این دکمه برای تمدید فوری است.)": "Re-issue the certificate from Let's Encrypt right now? (Automatic renewal is also checked every day; this button is for an immediate renewal.)", "حداکثر اتصال هم‌زمان از هر IP روی پورت‌های TLS (۰ = بدون محدودیت)": "Max simultaneous connections per IP on the TLS ports (0 = no limit)", "حالت آزمایشی Let's Encrypt (staging): برای امتحان کردن مراحل بدون مصرف سقف؛ گواهی آن معتبر نیست": "Let's Encrypt test mode (staging): to try the steps without using the rate limit; its certificate is not trusted", "📋 مشخصات TLS (ورود دستی)": "📋 TLS details (manual entry)", "نوع تانل": "Tunnel type", "WireGuard — سریع (UDP، پیشنهادی)": "WireGuard — fast (UDP, recommended)", "SSH — سازگار (TCP، کندتر)": "SSH — compatible (TCP, slower)", "⬆️ به‌روزرسانی سرور مقصد": "⬆️ Update exit server", "🛡️ آدرس‌های مجاز برای ورود به پنل": "🛡️ Addresses allowed to open the panel", "فقط این آدرس‌ها (یا محدوده‌ها مثل 203.0.113.0/24) به پنل می‌رسند؛ خالی یعنی همه. هر آدرس در یک خط یا جدا با ویرگول. آدرس فعلی خودت باید در لیست باشد. لینک‌های اشتراک کاربران همیشه باز می‌مانند.": "Only these addresses (or ranges such as 203.0.113.0/24) can reach the panel; empty means everybody. One address per line or separated by commas. Your own current address must be in the list. Users' subscription links always stay reachable.", "ذخیره‌ی آدرس‌های مجاز": "Save allowed addresses", "اگر قفل شدی، روی سرور بزن: ": "If you lock yourself out, run on the server: ", "اگر قفل شدی، روی سرور بزن:": "If you lock yourself out, run on the server:", "🎮 Game Profile (پینگ پایدار)": "🎮 Game Profile (stable ping)", "فعال‌سازی Game Profile": "Enable Game Profile", "تنظیمات OpenSSH (اختیاری)": "OpenSSH settings (optional)", "اعمال Compression no، UseDNS no و IPQoS lowdelay روی OpenSSH": "Apply Compression no, UseDNS no and IPQoS lowdelay to OpenSSH", "اعمال روی OpenSSH (sshd را reload می‌کند)": "Apply to OpenSSH (reloads sshd)", "Send buffer (بایت، ۰ = پیش‌فرض)": "Send buffer (bytes, 0 = default)", "فقط تنظیمات صف و ارسال همین سرور را برای تأخیر کمتر عوض می‌کند: fq به‌جای صف پیش‌فرض، BBR، tcp_notsent_lowat=16384 و tcp_slow_start_after_idle=0. مقدارهای قبلی ذخیره می‌شوند و با خاموش کردن دقیقاً برمی‌گردند. این تنظیمات جیتر مسیر اپراتور گوشی تا سرور را درست نمی‌کنند؛ برای تشخیص آن از «مانیتور شبکه» استفاده کن.": "Only changes this server's queue and sending settings to lower latency: fq instead of the default queue, BBR, tcp_notsent_lowat=16384 and tcp_slow_start_after_idle=0. The previous values are saved and restored exactly when you turn it off. These settings cannot fix jitter on the mobile operator path between the phone and the server; use the network monitor to tell the two apart.", "Compression no و UseDNS no در sshd فقط به‌صورت سراسری ممکن‌اند و روی همه‌ی پورت‌های SSH (پورت اصلی شما هم) اثر می‌گذارند. IPQoS lowdelay فقط روی پورت‌های SSH همین پنل اعمال می‌شود. اعمال، sshd را reload می‌کند (نشست‌های باز قطع نمی‌شوند). Dropbear به این تنظیمات ربطی ندارد.": "In sshd, Compression no and UseDNS no can only be global, so they also apply to every other SSH port (your main port included). IPQoS lowdelay is applied only to this panel's SSH ports. Applying reloads sshd (open sessions are not dropped). Dropbear is not affected by these settings.", "فقط رمزهای سبک chacha20-poly1305 و aes128-gcm (روی همه‌ی پورت‌های OpenSSH؛ کلاینت‌های قدیمی ممکن است وصل نشوند)": "Only the light ciphers chacha20-poly1305 and aes128-gcm (on all OpenSSH ports; old clients may fail to connect)", "🎮 Game (پورت جدا)": "🎮 Game (own port)", "Game DB 1 (اکانت‌های Game)": "Game DB 1 (Game accounts)", "🛰️ مانیتور شبکه": "🛰️ Network monitor", "فعال‌سازی پایش پینگ": "Enable ping monitoring", "هدف‌ها (حداکثر ۳، با ویرگول)": "Targets (up to 3, comma separated)", "میانگین RTT به میلی‌ثانیه (۱۲ ساعت گذشته)؛ هر خط یک هدف": "Mean RTT in milliseconds (last 12 hours); one line per target", "پکت‌لاس به درصد": "Packet loss in percent", "نشست‌های متصل (RTT از TCP همین سرور)": "Connected sessions (RTT from this server's TCP stack)", "پینگ از همین سرور به هدف‌ها (هر دقیقه ۱۰ بسته). این مسیر «سرور تا هدف» را می‌سنجد و مسیر گوشی تا سرور را نشان نمی‌دهد؛ برای آن جدول نشست‌ها در پایین (RTT از TCP همین سرور) را ببین. جیتر = میانگین اختلاف پاسخ‌های پشت‌سرهم.": "Ping from this server to the targets (10 packets per minute). This measures server-to-target, not the phone-to-server path; for that, see the sessions table below (RTT from this server's own TCP stack). Jitter = mean absolute difference between consecutive replies."}, ENP=[["ویرایش: {0}", "Edit: {0}"], ["پورت‌های فعال sshd: {0} (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)", "Active sshd ports: {0} (ports defined outside the panel, such as your own main port, are never touched)"], ["دسترس‌پذیری ۲۴ ساعت: {0}٪ · میانگین تأخیر: {1} ms · {2} نمونه قطع", "24 h availability: {0}% · average latency: {1} ms · {2} samples down"], ["بازیابی انجام شد ({0} کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.", "Restore finished ({0} users). The panel restarts in a few seconds; log in again."], ["ارسال نشد: {0}", "Not sent: {0}"], ["قالب «{0}» حذف شود؟", "Delete template “{0}”?"], ["{0} اکانت با پیشوند {1} ساخته شود؟", "Create {0} accounts with prefix {1}?"], ["تانل سالم است. IP خروجی: {0}", "The tunnel is healthy. Exit IP: {0}"], ["تانل حذف شد. اکانت‌های تبدیل‌شده به مستقیم: {0}", "Tunnel removed. Accounts converted to Direct: {0}"], ["اتصال به {0}:{1} با رمز و نصب کلید", "Connecting to {0}:{1} with the password and installing the key"], ["اتصال SSH برقرار نشد: {0}", "SSH connection failed: {0}"], ["ورود با کلید ناموفق: {0}", "Key login failed: {0}"], ["تداخل پورت روی این سرور رفع شد: {0}", "Port conflicts on this server were fixed: {0}"], ["تانل بالا نیامد: {0}", "The tunnel did not come up: {0}"], ["IP خروجی تانل: {0}", "Tunnel exit IP: {0}"]], HT={"tnNote": "The password is only used to install an SSH key and is not stored; after that the link uses the key.<br>⚠️ If you prefer not to type the server's password into the web page, run this in a terminal on this server:<br><code dir=\"ltr\">sshplus-tunnel-setup IP_SERVER [PORT] [USER]</code>", "biNote": "When creating an account the admin has two choices, <bdi dir=\"ltr\"><b>In</b></bdi> and <bdi dir=\"ltr\"><b>Out</b></bdi>: <bdi dir=\"ltr\"><b>In</b></bdi> is which server's IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is which server's IP the user reaches the internet with. All four combinations (<span dir=\"ltr\">1→1</span>, <span dir=\"ltr\">1→2</span>, <span dir=\"ltr\">2→1</span>, <span dir=\"ltr\">2→2</span>) are active and UDPGW (games/calls) works on all of them. No separate mode needs to be configured.", "how": "<bdi dir=\"ltr\"><b>In</b></bdi> is the server whose IP the user connects to and <bdi dir=\"ltr\"><b>Out</b></bdi> is the server whose IP is seen on the internet. “Server 1” is this server and “Server 2” is the tunnel server.<br>\n    1) When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2”, the traffic goes through the tunnel. This account works on the <b>SSH (OpenSSH)</b> ports and the <b>tunnel Dropbear</b> ports; the normal Dropbear ports are only for accounts whose <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 1”. Ports can be changed in the Settings tab.<br>\n    2) When <bdi dir=\"ltr\"><b>In</b></bdi> is “Server 2”, this server's ports are opened on server 2 and forwarded through the tunnel to this server. Port 22 and any port server 2 itself listens on are never touched, so admin access to both servers and to the panel always stays open. The firewall of server 2 must allow these ports and the real IP of the user is not visible on this server.<br>\n    3) If the tunnel goes down, every path that goes through it is <b>blocked</b> (instead of leaking out through the direct IP). It reconnects automatically.<br>\n    4) UDPGW (games/calls) works on all four combinations. When <bdi dir=\"ltr\"><b>Out</b></bdi> is “Server 2” it goes through the tunnel. The client keeps using <span dir=\"ltr\">127.0.0.1:7300</span>.<br>\n    5) The tunnel runs over SSH (TCP); for better speed keep BBR on for both servers.", "tgNote": "First create a bot in Telegram with @BotFather and paste the token here; then send <span dir=\"ltr\">/start</span> to the bot and press “Find Chat ID”. If Telegram cannot be reached from this server, the panel automatically sends through the tunnel.", "tgCmd": "Bot commands (only from the configured Chat ID): <span dir=\"ltr\">/status /users /online /backup</span>", "tlsNote": "SSH is wrapped inside a TLS connection, for apps or networks that want TLS/SNI.<br>• A “Normal only” account cannot log in on a TLS port, and a “TLS only” account cannot log in on the plain Dropbear ports.<br>• A “TLS only” account is also refused on the OpenSSH ports (such as 22); “Normal only” and “Both” accounts can log in there.<br>• Tunnel accounts have their own TLS port (they exit through the tunnel).<br>• The <span dir=\"ltr\">ssh://</span> link format for TLS is not standardised; if your app does not accept it, enter the address, port and SNI by hand.", "tlsShared": "This same certificate and domain are also used for the panel's own HTTPS; nothing else needs to be set up elsewhere."};
 const FAre=/[؀-ۿ]/, nrm=s=>String(s).replace(/\s+/g," ").trim(), ATTRS=["placeholder","title","aria-label"];
 const PATRE=ENP.map(p=>new RegExp("^"+nrm(p[0]).split(/(\{\d+\})/).map(x=>/^\{\d+\}$/.test(x)?"(.+?)":x.replace(/[.*+?^$()|[\]\\]/g,"\\$&")).join("")+"$","s"));
 function tr(s){
@@ -3248,19 +3621,19 @@ function setLang(l,init){
   if(l==="en"){trTree(document.body); MO.observe(document.body,MOopt)} else revert();
   document.querySelectorAll(".langBtn").forEach(b=>b.textContent=l==="en"?"FA":"EN");
   if(!init&&tok&&$("lBox").classList.contains("hid")){
-    load(1); if(!$("secT").classList.contains("hid")) loadTun(); if(!$("secL").classList.contains("hid")) loadTls(true); if(!$("secH").classList.contains("hid")) loadHist(); if(!$("secS").classList.contains("hid")){loadCert();loadTg()}
+    load(1); if(!$("secT").classList.contains("hid")) loadTun(); if(!$("secL").classList.contains("hid")) loadTls(true); if(!$("secH").classList.contains("hid")){loadHist();loadNet()} if(!$("secS").classList.contains("hid")){loadCert();loadTg()}
   }
 }
 function toggleLang(){setLang(LANG==="en"?"fa":"en")}
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let tnCfg={};
-let tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="", tlsB={}, tlsS={};
+let stLast={}, tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="", tlsB={}, tlsS={};
 function swTab(t){
   const T={u:"secU",t:"secT",l:"secL",h:"secH",s:"secS"}, B={u:"bTabU",t:"bTabT",l:"bTabL",h:"bTabH",s:"bTabS"};
   Object.keys(T).forEach(k=>{$(T[k]).classList.toggle("hid",k!==t); $(B[k]).classList.toggle("act",k===t)});
   if(t==="t") loadTun();
   if(t==="l") loadTls(true);
-  if(t==="h") loadHist();
+  if(t==="h"){loadHist();loadNet()}
   if(t==="s"){loadCert();loadTg()}
 }
 function srvName(v){return v==="B"?"S2":"S1"}
@@ -3270,11 +3643,22 @@ function routeBadge(x){
   return `<span class="bdg ${(x.en==="B"||x.tm==="tunnel")?"wn":"ok"}" title="In: ${esc(inH)} | Out: ${esc(outH)}">${srvName(x.en)} → ${srvName(x.tm==="tunnel"?"B":"A")}</span>`+cxBadge(x);
 }
 function cxBadge(x){
-  const c=x.cx||"both", t=c==="tls"?L("فقط TLS","TLS only"):(c==="normal"?L("فقط معمولی","Normal only"):L("معمولی + TLS","Normal + TLS"));
-  return ` <span class="bdg ${c==="both"?"ok":"wn"}" title="${esc(t)}">${c==="tls"?"TLS":(c==="normal"?"Normal":"N+TLS")}</span>`;
+  const c=x.cx||"both", t=c==="game"?L("اکانت Game (پورت جدا)","Game account (own port)"):c==="tls"?L("فقط TLS","TLS only"):(c==="normal"?L("فقط معمولی","Normal only"):L("معمولی + TLS","Normal + TLS"));
+  return ` <span class="bdg ${c==="both"?"ok":"wn"}" title="${esc(t)}">${c==="game"?"🎮 Game":c==="tls"?"TLS":(c==="normal"?"Normal":"N+TLS")}</span>`;
+}
+function cxRules(p){
+  // a game account is direct-only: "Out = server 2" and "game" exclude each other
+  const ex=$(p+"ex"), cx=$(p+"cx"), g=[...cx.options].find(o=>o.value==="game");
+  if(g) g.disabled=ex.value==="B"; if(cx.value==="game"&&ex.value==="B") ex.value="A";
+  if(ex.options[1]) ex.options[1].disabled=!tnCfg.conf||cx.value==="game";
 }
 function cxHint(en,cx){
-  const w=[]; if(cx!=="normal"&&!tlsB.on) w.push(L("⚠️ SSH روی TLS هنوز روشن نیست (تب «TLS و دامنه»)؛ تا آن موقع اکانت «فقط TLS» جایی وارد نمی‌شود.","⚠️ SSH over TLS is not switched on yet (TLS & Domain tab); until then a TLS-only account cannot log in on a Dropbear port."));
+  const w=[];
+  if(cx==="game"){
+    const g=(pCfg.gdb||[]).join(", ");
+    w.push(g?L("🎮 این اکانت فقط روی پورت Game Dropbear وصل می‌شود ("+g+"). پورت جدا فقط وقتی کمک می‌کند که کلاینت ترافیک بازی را با اتصال SSH جدا بفرستد؛ ترافیک UDP بازی داخل UDPGW و یک جریان TCP می‌رود و افت بسته می‌تواند آن را کند کند. پیشنهاد: کاربر همزمان ۲.","🎮 This account connects only on the game Dropbear port ("+g+"). A separate port only helps if the client sends game traffic over a separate SSH connection; UDP game traffic rides UDPGW inside one TCP stream, so packet loss can still slow it. Suggested concurrent users: 2."):L("⚠️ هیچ پورت Game Dropbear تنظیم نشده (تنظیمات سرور > پورت‌ها).","⚠️ No game Dropbear port is set (Server settings > Ports)."));
+    return w.join("<br>");
+  } if(cx!=="normal"&&!tlsB.on) w.push(L("⚠️ SSH روی TLS هنوز روشن نیست (تب «TLS و دامنه»)؛ تا آن موقع اکانت «فقط TLS» جایی وارد نمی‌شود.","⚠️ SSH over TLS is not switched on yet (TLS & Domain tab); until then a TLS-only account cannot log in on a Dropbear port."));
   return w.join("<br>");
 }
 function fillSrv(){
@@ -3286,7 +3670,10 @@ function fillSrv(){
 }
 function fillPorts(cn,ce){
   const sk=tnCfg.rev_skipped||[];
+  cxRules("n"); cxRules("e");
+  if($("ncx").value==="game"&&+$("nl").value<2) $("nl").value=2;
   const mk=(en,ex,cx)=>{
+    if(cx==="game"){const g=pCfg.gdb||[]; if(en==="B"){const mp=revMap(); return portOpts([],g.map(p=>mp[p]).filter(Boolean),[])} return portOpts([],g,[])}
     const db=(ex==="B"?(pCfg.tdb||[]):(pCfg.db||[]));
     const tl0=(cx!=="normal"&&tlsB.on)?(ex==="B"?(tlsB.tports||[]):(tlsB.ports||[])):[];
     if(en==="B"){const mp=revMap(), s2=(pCfg.ssh2&&pCfg.ssh2!=22)?[pCfg.ssh2]:[], tl2=tl0.map(p=>mp[p]).filter(Boolean), only2=cx==="tls"&&tl2.length>0; return portOpts(only2?[]:s2.map(p=>mp[p]).filter(Boolean),only2?[]:db.map(p=>mp[p]).filter(Boolean),tl2)}
@@ -3343,11 +3730,12 @@ async function load(force){
   const tn=d.tun||{}; tnCfg=tn; tlsB=d.tls||{}; fillSrv(); ovExtra(d);
   $("stTn").innerHTML=(tn.conf?(tn.up?`<span class="bdg ok">TUNNEL UP</span> <span style="font-size:.75rem;color:var(--mu)">${esc(tn.exit||"")}</span>`:`<span class="bdg er">TUNNEL DOWN</span>`):`<span class="bdg wn">OFF</span>`)
     +" "+(d.st.dbt?`<span class="bdg ok">DB-T (${(pCfg.tdb||[]).join(",")})</span>`:`<span class="bdg er">DB-T STOPPED</span>`);
-  $("stDb").innerHTML=(d.st.db?`<span class="bdg ok">ACTIVE (${db.join(",")})</span>`:`<span class="bdg er">STOPPED</span>`)+(tlsB.on?" "+(tlsB.up?`<span class="bdg ok">TLS (${(tlsB.ports||[]).concat(tlsB.tports||[]).join(",")})</span>`:`<span class="bdg er">TLS ✖</span>`):"");
+  stLast=d.st;
+  $("stDb").innerHTML=(d.st.db?`<span class="bdg ok">ACTIVE (${db.join(",")})</span>`:`<span class="bdg er">STOPPED</span>`)+(d.st.dbg===null||d.st.dbg===undefined?"":` <span class="bdg ${d.st.dbg?"ok":"er"}">GAME (${(pCfg.gdb||[]).join(",")})</span>`)+` <span class="bdg ${d.st.ssh?"ok":"er"}">OpenSSH</span>`+(tlsB.on?" "+(tlsB.up?`<span class="bdg ok">TLS (${(tlsB.ports||[]).concat(tlsB.tports||[]).join(",")})</span>`:`<span class="bdg er">TLS ✖</span>`):"");
   $("stBv").innerHTML=(d.st.bvt?"":'<span class="bdg er">UDPGW-T ✖</span> ')+(d.st.bv?`<span class="bdg ok">UDPGW ${esc(bv.BIND_ADDR||"")}:${esc(bv.UDP_PORT||7300)}</span>`:`<span class="bdg er">STOPPED</span>`);
   $("stBbr").innerHTML=bbrOn?`<span class="bdg ok">BBR ON</span>`:`<span class="bdg wn">${esc(bb.cc||"?")}</span>`;
   $("stRes").innerText=`CPU:${d.st.cpu}% | RAM:${d.st.mem}% | ↓${d.st.rx}M ↑${d.st.tx}M`;
-  $("pBan").innerText=`OpenSSH: ${sp.join(", ")} | Dropbear: ${db.join(", ")} | Tunnel-Dropbear: ${(pCfg.tdb||[]).join(", ")} | UDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`+(tlsB.on?` | TLS: ${(tlsB.ports||[]).join(", ")} / ${(tlsB.tports||[]).join(", ")}`:"");
+  $("pBan").innerText=`OpenSSH: ${sp.join(", ")} | Dropbear: ${db.join(", ")} | Tunnel-Dropbear: ${(pCfg.tdb||[]).join(", ")}${(pCfg.gdb||[]).length?" | Game-Dropbear: "+pCfg.gdb.join(", "):""} | UDPGW: 127.0.0.1:${bv.UDP_PORT||7300}`+(tlsB.on?` | TLS: ${(tlsB.ports||[]).join(", ")} / ${(tlsB.tports||[]).join(", ")}`:"");
   $("bbrCc").value=bb.cc||""; $("bbrQd").value=bb.qdisc||"";
   $("bbrSt").innerHTML=bbrOn?`<span class="bdg ok">فعال</span>`:(bb.avail?`<span class="bdg wn">غیرفعال</span>`:`<span class="bdg er">کرنل پشتیبانی نمی‌کند</span>`);
   $("bbrBtn").innerText=bbrOn?"⛔ خاموش کردن BBR":"🚀 روشن کردن BBR";
@@ -3359,8 +3747,9 @@ async function load(force){
     $("s1").value=pCfg.ssh||22; $("s2").value=pCfg.ssh2||0;
     for(let i=1;i<=6;i++) $("d"+i).value=db[i-1]||"";
     for(let i=1;i<=4;i++) $("td"+i).value=(pCfg.tdb||[])[i-1]||"";
+    for(let i=1;i<=2;i++) $("gd"+i).value=(pCfg.gdb||[])[i-1]||"";
     $("bp").value=bv.UDP_PORT||7300; $("bm").value=bv.UDP_MTU||1200; $("bc").value=bv.MAX_CLIENTS||1000;
-    $("bn").value=bv.MAX_CONN||64; $("bb").value=bv.BIND_ADDR||"127.0.0.1";
+    $("bn").value=bv.MAX_CONN||64; $("bb").value=bv.BIND_ADDR||"127.0.0.1"; $("bs").value=bv.SEND_BUFFER===undefined?65536:bv.SEND_BUFFER;
     $("sshAll").innerText="پورت‌های فعال sshd: "+sp.join(", ")+" (پورت‌هایی که بیرون از پنل تعریف شده‌اند، مثل پورت اصلی شما، دست نمی‌خورند)";
     if(!$("au").value && document.activeElement!==$("au")) $("au").value=d.adm||"admin";
     fillPorts(cn,ce);
@@ -3394,13 +3783,13 @@ async function saveUser(edit){
 }
 async function delU(u){if(confirm("Delete "+u+"?")){await api("/api/user/del","POST",{u});load(0)}}
 async function savePorts(){
-  const r=await api("/api/ports","POST",{ssh:$("s1").value,ssh2:$("s2").value,db:[1,2,3,4,5,6].map(i=>$("d"+i).value),tdb:[1,2,3,4].map(i=>$("td"+i).value)});
+  const r=await api("/api/ports","POST",{ssh:$("s1").value,ssh2:$("s2").value,db:[1,2,3,4,5,6].map(i=>$("d"+i).value),tdb:[1,2,3,4].map(i=>$("td"+i).value),gdb:[1,2].map(i=>$("gd"+i).value)});
   if(!r.ok){alert(r.msg||"Error");return}
   alert(L("پورت‌ها ذخیره شد","Ports saved")+(r.dropped&&r.dropped.length?L("\nنادیده گرفته شد (تکراری/رزرو): ","\nIgnored (duplicate/reserved): ")+r.dropped.join(", "):""));
   load(1);
 }
 async function saveBv(){
-  const r=await api("/api/badvpn","POST",{p:$("bp").value,m:$("bm").value,c:$("bc").value,n:$("bn").value,b:$("bb").value});
+  const r=await api("/api/badvpn","POST",{p:$("bp").value,m:$("bm").value,c:$("bc").value,n:$("bn").value,b:$("bb").value,s:$("bs").value});
   alert(r.ok?"BadVPN به‌روز شد":(r.msg||"Error")); load(1);
 }
 async function toggleBbr(){
@@ -3487,7 +3876,28 @@ function ovExtra(d){
 }
 // ---- HTTPS
 async function savePlainSub(){const r=await api("/api/plainsub","POST",{on:$("plainSub").checked}); if(!r.ok) alert("Error")}
-async function loadCert(){const d=await api("/api/cert"); $("plainSub").checked=!!d.plain_sub; $("certInfo").innerText=(d.https?"HTTPS: ON":L("HTTPS: OFF (HTTP ساده)","HTTPS: OFF (plain HTTP)"))+"\n"+(d.info||"")}
+async function loadGame(){
+  const d=await api("/api/game"); $("gameOn").checked=!!d.on;
+  $("gameKeys").innerHTML=(d.keys||[]).map(k=>`<div>${k.cur===k.want?"✅":"▫️"} ${esc(k.k)} = <b>${esc(k.cur||"n/a")}</b> <span style="color:var(--mu)">(${esc(L("هدف","target"))} ${esc(k.want)})</span></div>`).join("")
+    +`<div>${d.qdisc==="fq"?"✅":"▫️"} ${esc(L("صف اصلی کارت شبکه","root qdisc"))} ${esc(d.dev||"?")} = <b>${esc(d.qdisc||"n/a")}</b></div>`;
+  $("gameNotes").innerText=(d.notes||[]).join("\n"); $("gameSshd").checked=!!(d.sshd&&d.sshd.on); $("gameCip").checked=!!(d.sshd&&d.sshd.ciphers);
+}
+async function gameToggle(){
+  const on=$("gameOn").checked, r=await api("/api/game","POST",{on});
+  if(!r.ok) alert(r.msg||"Error"); else if((r.notes||[]).length) alert(r.notes.join("\n"));
+  loadGame(); load(1)
+}
+async function gameSshdApply(){
+  if(!confirm(L("sshd یک‌بار reload می‌شود (همه‌ی پورت‌های SSH، از جمله پورت اصلی شما، لحظه‌ای دوباره گوش می‌دهند؛ نشست‌های باز می‌مانند). ادامه؟","sshd will be reloaded once (every SSH port, your main one included, briefly re-listens; open sessions stay). Continue?"))) return;
+  const r=await api("/api/game/sshd","POST",{on:$("gameSshd").checked,ciphers:$("gameCip").checked});
+  alert(r.ok?(r.reloaded?L("اعمال شد و sshd reload شد.","Applied; sshd was reloaded."):L("تغییری لازم نبود.","Nothing to change.")):(r.msg||"Error")); loadGame()
+}
+async function loadAllow(){const d=await api("/api/allow"); $("alwList").value=(d.list||[]).join("\n"); $("alwMe").innerText=L("آدرس فعلی تو: ","Your current address: ")+(d.me||"")}
+async function saveAllow(){
+  const r=await api("/api/allow","POST",{list:$("alwList").value});
+  alert(r.ok?(r.list.length?L("ذخیره شد. فقط این آدرس‌ها به پنل می‌رسند.","Saved. Only these addresses can reach the panel."):L("ذخیره شد: همه‌ی آدرس‌ها مجازند.","Saved: every address is allowed.")):(r.msg||"Error")); loadAllow()
+}
+async function loadCert(){loadAllow(); loadGame(); const d=await api("/api/cert"); $("plainSub").checked=!!d.plain_sub; $("certInfo").innerText=(d.https?"HTTPS: ON":L("HTTPS: OFF (HTTP ساده)","HTTPS: OFF (plain HTTP)"))+"\n"+(d.info||"")}
 async function saveCert(){
   const dom=$("tlsUpDom").value.trim();
   const r=await api("/api/cert","POST",{cert:$("certPem").value,key:$("certKey").value});
@@ -3656,6 +4066,34 @@ function subCopy(){copyText(subUrl)}
 function fmtB(n){n=+n||0; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1024&&i<4){n/=1024;i++} return (i?n.toFixed(i>2?2:1):n.toFixed(0))+" "+u[i]}
 function cvs(id,h){const c=$(id), dpr=window.devicePixelRatio||1, w=c.clientWidth||300; c.width=w*dpr; c.height=h*dpr; c.style.height=h+"px"; const x=c.getContext("2d"); x.scale(dpr,dpr); x.direction="ltr"; x.textAlign="left"; return [x,w,h]}
 function hours(x,w,h,cut,col){x.fillStyle=col; x.font="10px sans-serif"; for(let i=0;i<=4;i++){x.textAlign=i===0?"left":(i===4?"right":"center"); x.fillText(new Date((cut+i*21600)*1000).getHours()+":00",25+i*(w-30)/4,h-2)} x.textAlign="left"}
+const NMC=["--pr","--wn","#a78bfa"];
+async function saveNet(){
+  const r=await api("/api/netmon/save","POST",{on:$("nmOn").checked,targets:$("nmTg").value});
+  if(!r.ok) alert(r.msg||"Error"); loadNet(true)
+}
+async function loadNet(keepForm){
+  let d,s; try{d=await api("/api/netmon"); s=await api("/api/netmon/sessions")}catch(e){return}
+  if(!keepForm||!$("nmTg").value){$("nmOn").checked=!!d.on; if(document.activeElement!==$("nmTg")) $("nmTg").value=(d.targets||[]).join(", ")}
+  const st=stLast||{}, B=(ok,n)=>`<span class="bdg ${ok?"ok":"er"}">${n}</span>`;
+  $("nmSvc").innerHTML=B(st.ssh,"OpenSSH")+" "+B(st.db,"Dropbear")+" "+(st.dbg===null||st.dbg===undefined?"":B(st.dbg,"Game Dropbear")+" ")+B(st.bv,"UDPGW")+` <span class="bdg ok">${esc(L("آنلاین","online"))}: ${st.on_tot||0}</span>`;
+  const css=getComputedStyle(document.documentElement), C=n=>n[0]==="-"?(css.getPropertyValue(n).trim()||"#888"):n, now=Date.now()/1000, span=43200, cut=now-span;
+  const tg=d.targets||[], sum=[];
+  let [x,w,h]=cvs("cNm",120), [x2,w2,h2]=cvs("cNmL",70);
+  const all=tg.flatMap(t=>(d.series[t]||[]).filter(r=>r[1]>=0).map(r=>r[1])), mx=Math.max(20,...all), X=(r,W)=>(r[0]-cut)/span*(W-30)+25;
+  [[x,w,h],[x2,w2,h2]].forEach(([c,W,H])=>{c.fillStyle=C("--mu"); c.font="10px sans-serif"; c.textAlign="left"; c.fillText("-12h",25,H-3); c.textAlign="center"; c.fillText("-6h",25+(W-30)/2,H-3); c.textAlign="right"; c.fillText("now",W-5,H-3); c.textAlign="left"});
+  x.fillText(mx.toFixed(0)+" ms",0,10); x2.fillText("100%",0,10);
+  tg.forEach((t,i)=>{
+    const pts=(d.series[t]||[]).filter(r=>r[0]>=cut), col=C(NMC[i%3]);
+    x.strokeStyle=col; x.lineWidth=1.5; x.beginPath(); let go=false;
+    pts.forEach(r=>{if(r[1]<0){go=false;return} const px=X(r,w), py=h-16-(r[1]/mx)*(h-30); if(!go){x.moveTo(px,py);go=true}else x.lineTo(px,py)}); x.stroke();
+    x2.strokeStyle=col; x2.lineWidth=1.5; x2.beginPath(); pts.forEach((r,k)=>{const px=X(r,w2), py=h2-16-(Math.min(100,r[3])/100)*(h2-26); k?x2.lineTo(px,py):x2.moveTo(px,py)}); x2.stroke();
+    const ok=pts.filter(r=>r[1]>=0), av=a=>a.length?a.reduce((p,q)=>p+q,0)/a.length:0, l=pts[pts.length-1];
+    sum.push(`<div><span style="color:${col}">●</span> <b dir="ltr">${esc(t)}</b> — ${l?(l[1]<0?L("بدون پاسخ","no reply"):`RTT ${l[1]} ms · ${L("جیتر","jitter")} ${l[2]} ms · ${L("لاس","loss")} ${l[3]}%`):L("هنوز داده‌ای نیست","no data yet")}`+(ok.length?` <span style="color:var(--mu)">(${L("میانگین ۱۲ ساعت","12 h mean")}: RTT ${av(ok.map(r=>r[1])).toFixed(1)} ms · ${L("جیتر","jitter")} ${av(ok.map(r=>r[2])).toFixed(1)} ms · ${L("لاس","loss")} ${av(pts.map(r=>r[3])).toFixed(1)}%)</span>`:"")+`</div>`);
+  });
+  $("nmSum").innerHTML=d.on?sum.join(""):`<span style="color:var(--wn)">${L("پایش خاموش است؛ برای ثبت داده فعالش کن.","Monitoring is off; switch it on to record data.")}</span>`;
+  $("nmSessSum").innerText=s.n?`${s.n} ${L("نشست","sessions")} · ${L("میانه RTT","median RTT")} ${s.median} ms · ${s.with_retrans} ${L("نشست با بازارسال","with retransmits")}`:L("نشست متصلی نیست.","No connected sessions.");
+  $("nmSess").innerHTML=s.n?`<tr><th>${L("کاربر","User")}</th><th>IP</th><th>${L("پورت","Port")}</th><th>RTT (ms)</th><th>${L("نوسان","var")}</th><th>${L("بازارسال","retrans")}</th></tr>`+s.rows.map(r=>`<tr><td>${esc(r.user||"—")}</td><td dir="ltr">${esc(r.peer)}</td><td>${r.port}</td><td>${r.rtt}</td><td>${r.var}</td><td>${r.retrans}</td></tr>`).join(""):"";
+}
 async function loadHist(){
   let d; try{d=await api("/api/history")}catch(e){return}
   const S=d.s||[], now=Date.now()/1000, cut=now-86400, pts=S.filter(r=>r[0]>=cut);
@@ -3708,7 +4146,7 @@ HTMLEOF
 sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
 
 # firewall: only if ufw is active
-FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))') $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/tls.json"));print(" ".join(map(str,d.get("ports",[])+d.get("tports",[]))) if d.get("on") else "")' 2>/dev/null)"
+FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[])+d.get("gdb",[]))))') $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/tls.json"));print(" ".join(map(str,d.get("ports",[])+d.get("tports",[]))) if d.get("on") else "")' 2>/dev/null)"
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
   for p in $FWP; do ufw allow "${p}/tcp" >/dev/null 2>&1; done
 fi
@@ -3721,6 +4159,10 @@ systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus
 systemctl enable sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net badvpn badvpn-t >/dev/null 2>&1
 systemctl restart sshplus-tunnel-net
 systemctl restart sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel
+# game instance (own Dropbear + port for "game" accounts): runs while ports.json has a "gdb" port
+if python3 -c 'import json,sys;sys.exit(0 if json.load(open("/etc/SSHPlus/ports.json")).get("gdb") else 1)' 2>/dev/null; then
+  systemctl enable sshplus-dropbear-g >/dev/null 2>&1; systemctl restart sshplus-dropbear-g
+fi
 # SSH over TLS stays on after an update if it was switched on from the panel
 if python3 -c 'import json,sys;sys.exit(0 if json.load(open("/etc/SSHPlus/tls.json")).get("on") else 1)' 2>/dev/null; then
   systemctl enable sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel >/dev/null 2>&1
@@ -3736,7 +4178,7 @@ sleep 2
 IP=$(curl -sfL --max-time 4 https://api.ipify.org || hostname -I | awk '{print $1}')
 echo "=========================================="
 echo "Panel:     $(systemctl is-active sshplus-panel)"
-echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t))"
+echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t), game instance: $(systemctl is-active sshplus-dropbear-g))"
 if systemctl is-active --quiet sshplus-stunnel; then echo "SSH-TLS:   active (Panel -> TLS tab)"; else echo "SSH-TLS:   off (Panel -> TLS tab to switch on)"; fi
 if [ -f /etc/SSHPlus/tunnel.conf ]; then echo "Tunnel:    $(systemctl is-active sshplus-tunnel)"; else echo "Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)"; fi
 echo "BadVPN:    $(systemctl is-active badvpn)   (tunnel instance: $(systemctl is-active badvpn-t))"

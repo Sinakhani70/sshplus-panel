@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -388,6 +389,170 @@ class TlsExtras(unittest.TestCase):
         x["tls"].update({"sni": "", "insecure": True, "host": "1.2.3.4"})
         t = app.tls_manual_text(x); self.assertIn("yes (self-signed)", t); self.assertNotIn("-servername", t)
         self.assertEqual(app.tls_manual_text({"u": "u1", "pw": "pw", "tls": None}), "")
+
+
+class SecurityHardening(unittest.TestCase):
+    def test_anchors_refuse_trailing_newline(self):
+        for rx, ok in ((app.NAME_RE, "alice"), (app.HOST_RE, "1.2.3.4"), (app.TUSER_RE, "root"), (app.IP_RE, "10.0.0.1")):
+            self.assertTrue(rx.match(ok)); self.assertIsNone(rx.match(ok + "\n"))
+        self.assertIsNone(app.sub_find("a" * 24 + "\n"))
+
+    def test_request_length_is_checked_before_reading(self):
+        self.assertEqual(app.req_len("12", "/api/login"), (12, 0))
+        self.assertEqual(app.req_len(None, "/api/login"), (0, 0))
+        self.assertEqual(app.req_len("-1", "/api/login"), (0, 400))
+        self.assertEqual(app.req_len("abc", "/api/login"), (0, 400))
+        self.assertEqual(app.req_len(str(2 << 20), "/api/login"), (0, 413))
+        self.assertEqual(app.req_len(str(2 << 20), "/api/restore"), (2 << 20, 0))
+        self.assertEqual(app.req_len(str(64 << 20), "/api/restore"), (0, 413))
+
+    def test_allowlist(self):
+        self.assertTrue(app.ip_allowed("8.8.8.8", []))
+        al = app.allow_parse(["203.0.113.7", " 10.0.0.0/8 ", "203.0.113.7", "", "2001:db8::/32"])
+        self.assertEqual(al, ["203.0.113.7/32", "10.0.0.0/8", "2001:db8::/32"])
+        self.assertTrue(app.ip_allowed("10.1.2.3", al)); self.assertTrue(app.ip_allowed("203.0.113.7", al))
+        self.assertFalse(app.ip_allowed("203.0.113.8", al)); self.assertFalse(app.ip_allowed("not-an-ip", al))
+        self.assertTrue(app.ip_allowed("::ffff:10.1.2.3", al))                         # IPv4 seen through a dual-stack socket
+        with self.assertRaises(ValueError): app.allow_parse(["1.2.3.4; rm -rf /"])
+        with self.assertRaises(ValueError): app.allow_parse(["10.0.0.%d" % i for i in range(60)])
+
+    def test_allowlist_cannot_lock_out_the_caller(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.CFG; app.CFG = os.path.join(d, "panel.json")
+            try:
+                c, r = app.allow_save({"list": "203.0.113.9"}, "198.51.100.1"); self.assertEqual(c, 400); self.assertFalse(os.path.exists(app.CFG))
+                c, r = app.allow_save({"list": "203.0.113.9, 198.51.100.0/24"}, "198.51.100.1"); self.assertEqual(c, 200)
+                self.assertEqual(json.load(open(app.CFG))["allow"], ["203.0.113.9/32", "198.51.100.0/24"])
+                c, r = app.allow_save({"list": []}, "198.51.100.1"); self.assertEqual((c, json.load(open(app.CFG))["allow"]), (200, []))
+            finally: app.CFG = old
+
+    def test_prune_auth(self):
+        app.TOK.clear(); app.FAIL.clear(); now = time.time()
+        app.TOK.update({"old": now - 5, "new": now + 500}); app.FAIL.update({"1.1.1.1": [now - 400], "2.2.2.2": [now - 10]})
+        app.prune_auth()
+        self.assertEqual(list(app.TOK), ["new"]); self.assertEqual(list(app.FAIL), ["2.2.2.2"])
+        app.TOK.clear(); app.FAIL.clear()
+
+
+class NetMonitor(unittest.TestCase):
+    PING = """PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
+64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=50.0 ms
+64 bytes from 1.1.1.1: icmp_seq=2 ttl=57 time=60.0 ms
+64 bytes from 1.1.1.1: icmp_seq=4 ttl=57 time=55.0 ms
+
+--- 1.1.1.1 ping statistics ---
+4 packets transmitted, 3 received, 25% packet loss, time 601ms
+"""
+    def test_sample_math(self):
+        t, avg, jit, loss, mx = app.nm_sample(self.PING)
+        self.assertEqual((avg, loss, mx), (55.0, 25.0, 60.0))
+        self.assertEqual(jit, 7.5)                                   # mean(|60-50|, |55-60|) = 7.5: consecutive replies, not the standard deviation
+        self.assertEqual(app.nm_sample("ping: connect: Network is unreachable")[1:], [-1, 0, 100.0, -1])
+        self.assertEqual(app.nm_sample("4 packets transmitted, 0 received, 100% packet loss")[3], 100.0)
+
+    def test_targets_are_validated(self):
+        for ok in ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "example.com", " Example.COM "): self.assertTrue(app.nm_target(ok), ok)
+        for bad in ("-c1", "--help", "a;b.com", "x y.com", "localhost", "1.1.1.1\n-f", "", "a" * 120 + ".com"): self.assertEqual(app.nm_target(bad), "", bad)
+        with tempfile.TemporaryDirectory() as d:
+            old = app.NETMON_CF; app.NETMON_CF = os.path.join(d, "nm.json")
+            try:
+                self.assertEqual(app.netmon_save({"on": True, "targets": "1.1.1.1, 8.8.8.8"})[0], 200)
+                self.assertEqual(app.netmon_cfg(), {"on": True, "targets": ["1.1.1.1", "8.8.8.8"]})
+                self.assertEqual(app.netmon_save({"targets": ["1.1.1.1", "9.9.9.9", "8.8.4.4", "4.4.4.4"]})[0], 400)
+                self.assertEqual(app.netmon_save({"targets": ["-c1"]})[0], 400)
+                self.assertEqual(app.netmon_cfg()["targets"], ["1.1.1.1", "8.8.8.8"])      # a refused save changes nothing
+            finally: app.NETMON_CF = old
+
+    def test_session_stats_parser(self):
+        out = ("0      0      10.0.0.1:442      203.0.113.7:50111\n\t cubic rtt:180.5/60 cwnd:10 retrans:0/3 unacked:2\n"
+               "0      0      10.0.0.1:442      198.51.100.9:40000\n\t cubic rtt:35/4 cwnd:10\n"
+               "0      0      127.0.0.1:40100      127.0.0.1:60000\n\t cubic rtt:0.1/0.05\n"
+               "0      0      10.0.0.1:9999      203.0.113.8:1\n\t cubic rtt:500/1\n")
+        keep = {n: getattr(app, n) for n in ("cmd", "sshd_ports", "rjson", "tls_cfg", "IPS")}
+        try:
+            app.cmd = lambda c, *a, **k: (0, out, ""); app.sshd_ports = lambda: {22}
+            app.rjson = lambda p, d=None: {"db": [442]} if p == app.PORTS else (d if d is not None else {})
+            app.tls_cfg = lambda: {"on": False, "ports": [], "tports": []}; app.IPS = {"alice": ["203.0.113.7"]}
+            r = app.net_sessions()
+        finally:
+            for n, v in keep.items(): setattr(app, n, v)
+        self.assertEqual(r["n"], 2)                                   # port 9999 is not ours, 127.0.0.1 (TLS back end) is skipped
+        self.assertEqual([x["peer"] for x in r["rows"]], ["203.0.113.7", "198.51.100.9"])   # worst RTT first
+        self.assertEqual((r["rows"][0]["user"], r["rows"][0]["retrans"], r["with_retrans"], r["median"]), ("alice", 3, 1, 180.5))
+
+
+class GameAccounts(unittest.TestCase):
+    def test_shell_matrix_has_a_direct_only_game_shell(self):
+        g = app.shell_for("direct", "game")
+        self.assertTrue(g.endswith("-g")); self.assertEqual(app.SHELL_OF[g], ("direct", "game"))
+        self.assertEqual(app.shell_for("tunnel", "game"), g)                    # never a tunnel shell
+        self.assertFalse(app.is_tun(g))
+        self.assertEqual(len(set(app.SHELLS.values())), len(app.SHELLS))        # every combination has its own shell
+
+    def test_game_accounts_are_direct_only_and_need_a_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.PORTS; app.PORTS = os.path.join(d, "ports.json")
+            try:
+                json.dump({"db": [442], "tdb": [2087], "gdb": [4455]}, open(app.PORTS, "w"))
+                c, r = app.user_save({"u": "gx1", "pw": "abc12345", "tm": "tunnel", "cx": "game"})
+                self.assertEqual(c, 400); self.assertIn("direct-only", r["msg"])
+                json.dump({"db": [442], "tdb": [2087]}, open(app.PORTS, "w"))
+                c, r = app.user_save({"u": "gx2", "pw": "abc12345", "tm": "direct", "cx": "game"})
+                self.assertEqual(c, 400); self.assertIn("game Dropbear port", r["msg"])
+                self.assertEqual(app.game_ports(), [])
+                json.dump({"gdb": [4455, 4466, 4477, "x", 0]}, open(app.PORTS, "w")); self.assertEqual(app.game_ports(), [4455, 4466])
+            finally: app.PORTS = old
+
+    def test_game_ports_are_part_of_the_reverse_entry_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.PORTS; app.PORTS = os.path.join(d, "ports.json")
+            try:
+                json.dump({"db": [442], "tdb": [2087], "gdb": [4455], "ssh2": 2222}, open(app.PORTS, "w"))
+                self.assertIn(4455, app.rev_ports())
+            finally: app.PORTS = old
+
+
+class GameProfile(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); d = self.d.name
+        self.keep = {n: getattr(app, n) for n in ("GAMEF", "GAME_SYSF", "BBRF", "cmd", "sysctl_get", "wan_dev", "root_qdisc", "bbr_state", "PORTS")}
+        app.GAMEF = os.path.join(d, "game.json"); app.GAME_SYSF = os.path.join(d, "sys.conf"); app.BBRF = os.path.join(d, "bbr.conf"); app.PORTS = os.path.join(d, "ports.json")
+        self.k = {"net.core.default_qdisc": "fq_codel", "net.ipv4.tcp_congestion_control": "cubic", "net.ipv4.tcp_notsent_lowat": "4294967295", "net.ipv4.tcp_slow_start_after_idle": "1"}
+        self.q = ["fq_codel"]; self.calls = []
+        def cmd(c, *a, **kw):
+            self.calls.append(c)
+            if c[0] == "sysctl" and c[1] == "-w": k, v = c[2].split("="); self.k[k] = v
+            if c[:3] == ["tc", "qdisc", "replace"]: self.q[0] = c[-1]
+            if c[:3] == ["tc", "qdisc", "del"]: self.q[0] = "fq_codel"
+            return 0, "", ""
+        app.cmd = cmd; app.sysctl_get = lambda k: self.k.get(k, ""); app.wan_dev = lambda: "eth0"; app.root_qdisc = lambda dev: self.q[0]
+        app.bbr_state = lambda: {"avail": True, "on": False, "cc": self.k["net.ipv4.tcp_congestion_control"], "qdisc": ""}
+    def tearDown(self):
+        for n, v in self.keep.items(): setattr(app, n, v)
+        self.d.cleanup()
+    def test_enable_applies_and_disable_restores_the_previous_values(self):
+        before = dict(self.k)
+        c, r = app.game_apply(True); self.assertEqual(c, 200)
+        self.assertEqual((self.k["net.core.default_qdisc"], self.k["net.ipv4.tcp_congestion_control"], self.k["net.ipv4.tcp_notsent_lowat"], self.k["net.ipv4.tcp_slow_start_after_idle"]), ("fq", "bbr", "16384", "0"))
+        self.assertEqual(self.q[0], "fq"); self.assertIn("tcp_notsent_lowat = 16384", open(app.GAME_SYSF).read())
+        app.game_apply(True)                                                              # a second "on" must not overwrite the saved originals
+        c, r = app.game_apply(False)
+        self.assertEqual(self.k, before); self.assertEqual(self.q[0], "fq_codel"); self.assertFalse(os.path.exists(app.GAME_SYSF))
+        self.assertFalse(json.load(open(app.GAMEF))["on"])
+    def test_missing_keys_and_no_bbr_are_reported_not_invented(self):
+        del self.k["net.ipv4.tcp_notsent_lowat"]
+        app.bbr_state = lambda: {"avail": False, "on": False, "cc": "cubic", "qdisc": ""}
+        c, r = app.game_apply(True)
+        self.assertEqual(self.k["net.ipv4.tcp_congestion_control"], "cubic")
+        self.assertTrue(any("tcp_notsent_lowat" in n for n in r["notes"])); self.assertTrue(any("BBR" in n for n in r["notes"]))
+        self.assertNotIn("tcp_notsent_lowat", open(app.GAME_SYSF).read())
+    def test_sshd_text_scopes_ipqos_to_the_panel_ports(self):
+        open(app.PORTS, "w").write(json.dumps({"ssh": 22, "ssh2": 2222}))
+        t = app.game_sshd_text(False)
+        self.assertIn("Match LocalPort 22\n  IPQoS lowdelay", t); self.assertIn("Match LocalPort 2222\n  IPQoS lowdelay", t)
+        self.assertIsNone(re.search(r"(?m)^Ciphers ", t)); self.assertNotIn("9011", t)
+        self.assertIsNotNone(re.search(r"(?m)^Ciphers chacha20-poly1305@openssh.com,aes128-gcm@openssh.com$", app.game_sshd_text(True)))
+        self.assertTrue(t.rstrip().endswith("IPQoS lowdelay"))                            # Match blocks last: nothing after them is swallowed
 
 
 class ExitUpdate(unittest.TestCase):

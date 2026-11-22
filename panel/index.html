@@ -69,7 +69,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
-  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select>
+  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select>
   <div id="eCx" style="font-size:.76rem;color:var(--wn);margin:-.4rem 0 .5rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
   <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
@@ -122,7 +122,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -144,7 +144,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
-      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
     </div>
     <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
@@ -270,6 +270,20 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div>
 
 <div id="secH" class="hid">
+  <div class="card"><h3 style="margin-bottom:.5rem;color:var(--pr)">🛰️ مانیتور شبکه</h3>
+    <div id="nmSvc" style="margin-bottom:.6rem"></div>
+    <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin-bottom:.6rem">پینگ از همین سرور به هدف‌ها (هر دقیقه ۱۰ بسته). این مسیر «سرور تا هدف» را می‌سنجد و مسیر گوشی تا سرور را نشان نمی‌دهد؛ برای آن جدول نشست‌ها در پایین (RTT از TCP همین سرور) را ببین. جیتر = میانگین اختلاف پاسخ‌های پشت‌سرهم.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.4rem"><input type="checkbox" id="nmOn" style="width:auto;margin:.2rem 0 0" onchange="saveNet()"><span>فعال‌سازی پایش پینگ</span></label>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.6rem"><div style="flex:1;min-width:200px"><label>هدف‌ها (حداکثر ۳، با ویرگول)</label><input id="nmTg" dir="ltr" autocapitalize="none" placeholder="1.1.1.1, 8.8.8.8"></div><button class="btn btn-s" onclick="saveNet()">ذخیره</button></div>
+    <div id="nmSum" style="font-size:.8rem;line-height:1.9;margin-bottom:.4rem"></div>
+    <canvas id="cNm" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin:.2rem 0 .6rem">میانگین RTT به میلی‌ثانیه (۱۲ ساعت گذشته)؛ هر خط یک هدف</div>
+    <canvas id="cNmL" style="width:100%;display:block"></canvas>
+    <div style="font-size:.72rem;color:var(--mu);margin:.2rem 0 .8rem">پکت‌لاس به درصد</div>
+    <b style="font-size:.85rem">نشست‌های متصل (RTT از TCP همین سرور)</b>
+    <div id="nmSessSum" style="font-size:.76rem;color:var(--mu);margin:.3rem 0"></div>
+    <div style="overflow-x:auto"><table class="t" id="nmSess" style="font-size:.76rem"></table></div>
+  </div>
   <div class="card"><h3 style="margin-bottom:.4rem;color:var(--pr)">🌐 وضعیت تانل (۲۴ ساعت گذشته)</h3>
     <div id="hTunSum" style="font-size:.82rem;color:var(--mu);margin-bottom:.4rem"></div><canvas id="cTun" style="width:100%;display:block"></canvas>
     <div style="font-size:.72rem;color:var(--mu);margin-top:.3rem">خط آبی: تأخیر (ms) · نوار قرمز: تانل قطع بوده</div></div>
@@ -280,6 +294,21 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div>
 
 <div id="secS" class="hid">
+  <div class="card" id="gameCard">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🎮 Game Profile (پینگ پایدار)</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.9;margin-bottom:.6rem">فقط تنظیمات صف و ارسال همین سرور را برای تأخیر کمتر عوض می‌کند: fq به‌جای صف پیش‌فرض، BBR، tcp_notsent_lowat=16384 و tcp_slow_start_after_idle=0. مقدارهای قبلی ذخیره می‌شوند و با خاموش کردن دقیقاً برمی‌گردند. این تنظیمات جیتر مسیر اپراتور گوشی تا سرور را درست نمی‌کنند؛ برای تشخیص آن از «مانیتور شبکه» استفاده کن.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.6rem"><input type="checkbox" id="gameOn" style="width:auto;margin:.2rem 0 0" onchange="gameToggle()"><span>فعال‌سازی Game Profile</span></label>
+    <div id="gameKeys" style="font-size:.76rem;line-height:1.9;direction:ltr;text-align:left;margin-bottom:.4rem"></div>
+    <div id="gameNotes" style="font-size:.76rem;color:var(--wn);line-height:1.8;margin-bottom:.6rem"></div>
+    <div style="border-top:1px solid var(--bd);padding-top:.7rem;margin-top:.4rem">
+      <b style="font-size:.85rem">تنظیمات OpenSSH (اختیاری)</b>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin:.4rem 0">Compression no و UseDNS no در sshd فقط به‌صورت سراسری ممکن‌اند و روی همه‌ی پورت‌های SSH (پورت اصلی شما هم) اثر می‌گذارند. IPQoS lowdelay فقط روی پورت‌های SSH همین پنل اعمال می‌شود. اعمال، sshd را reload می‌کند (نشست‌های باز قطع نمی‌شوند). Dropbear به این تنظیمات ربطی ندارد.</div>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameSshd" style="width:auto;margin:.2rem 0 0"><span>اعمال Compression no، UseDNS no و IPQoS lowdelay روی OpenSSH</span></label>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameCip" style="width:auto;margin:.2rem 0 0"><span>فقط رمزهای سبک chacha20-poly1305 و aes128-gcm (روی همه‌ی پورت‌های OpenSSH؛ کلاینت‌های قدیمی ممکن است وصل نشوند)</span></label>
+      <button class="btn btn-s btn-w" onclick="gameSshdApply()">اعمال روی OpenSSH (sshd را reload می‌کند)</button>
+    </div>
+  </div>
+
   <div class="g2">
     <div class="card">
       <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 BBR (کنترل ازدحام TCP)</h3>
@@ -320,6 +349,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>Tunnel DB 2</label><input id="td2" type="number"></div>
       <div><label>Tunnel DB 3</label><input id="td3" type="number"></div>
       <div><label>Tunnel DB 4</label><input id="td4" type="number"></div>
+      <div><label>Game DB 1 (اکانت‌های Game)</label><input id="gd1" type="number"></div>
+      <div><label>Game DB 2</label><input id="gd2" type="number"></div>
     </div>
     <button class="btn btn-s" onclick="savePorts()">ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)</button>
     <h3 style="margin:1.2rem 0 .6rem">🎮 BadVPN UDPGW</h3>
@@ -328,6 +359,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>UDP MTU</label><input id="bm" type="number"></div>
       <div><label>Max Clients</label><input id="bc" type="number"></div>
       <div><label>Max Conn / Client</label><input id="bn" type="number"></div>
+      <div><label>Send buffer (بایت، ۰ = پیش‌فرض)</label><input id="bs" type="number" min="0" max="16777216"></div>
       <div><label>Bind</label><select id="bb"><option value="127.0.0.1">127.0.0.1 (امن)</option><option value="0.0.0.0">0.0.0.0 (عمومی)</option></select></div>
     </div>
     <button class="btn btn-s btn-w" onclick="saveBv()">ذخیره و ری‌استارت BadVPN</button>
@@ -341,6 +373,15 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.2rem"><input type="checkbox" id="plainSub" style="width:auto;margin:.2rem 0 0" onchange="savePlainSub()"><span>اجازه‌ی لینک اشتراک روی HTTP ساده (برای برنامه‌هایی که گواهی self-signed را نمی‌پذیرند)</span></label>
     <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin:0 0 .8rem">⚠️ رمز اکانت داخل لینک است و روی HTTP ساده در مسیر قابل شنود است. فقط در صورت نیاز روشن کن؛ بقیه‌ی پنل همیشه HTTPS می‌ماند.</div>
     <button class="btn btn-s" onclick="swTab('l')">🔒 رفتن به تب TLS و دامنه</button>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🛡️ آدرس‌های مجاز برای ورود به پنل</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.8;margin-bottom:.6rem">فقط این آدرس‌ها (یا محدوده‌ها مثل 203.0.113.0/24) به پنل می‌رسند؛ خالی یعنی همه. هر آدرس در یک خط یا جدا با ویرگول. آدرس فعلی خودت باید در لیست باشد. لینک‌های اشتراک کاربران همیشه باز می‌مانند.</div>
+    <textarea id="alwList" rows="3" dir="ltr" autocapitalize="none" placeholder="203.0.113.7"></textarea>
+    <div id="alwMe" style="font-size:.76rem;color:var(--mu);margin:.3rem 0 .6rem;direction:ltr;text-align:left"></div>
+    <button class="btn btn-s" onclick="saveAllow()">ذخیره‌ی آدرس‌های مجاز</button>
+    <div style="font-size:.74rem;color:var(--wn);line-height:1.7;margin-top:.6rem">اگر قفل شدی، روی سرور بزن: <code>python3 /opt/sshplus-panel/app.py --allow-off</code></div>
   </div>
 
   <div class="card">
