@@ -1,6 +1,7 @@
 #!/bin/bash
-# usage: start-dropbear.sh direct|tunnel|tlsd|tlst
+# usage: start-dropbear.sh direct|tunnel|game|tlsd|tlst
 #   direct / tunnel : public ports from ports.json ("db" / "tdb")
+#   game            : the game accounts' own instance, ports.json "gdb" (up to 2 ports)
 #   tlsd   / tlst   : TLS back ends, bound to 127.0.0.1 only (stunnel is the public TLS front, tls.json "bd" / "bt").
 #                     TLS_BACKENDS (6) Dropbear processes on consecutive ports: Dropbear refuses more than 5 unauthenticated
 #                     connections per source IP and every TLS client reaches it from 127.0.0.1, so stunnel spreads them round-robin.
@@ -19,15 +20,15 @@ if mode in ("tlsd","tlst"):
     except Exception: v=dflt
     print(v if 0<v<65500 else dflt)
     sys.exit(0)
-key="tdb" if mode=="tunnel" else "db"
-dflt="-p 2087" if mode=="tunnel" else "-p 442 -p 444"
+key={"tunnel":"tdb","game":"gdb"}.get(mode,"db")
+dflt={"tunnel":"-p 2087","game":"-p 4455"}.get(mode,"-p 442 -p 444")
 try:
     d=json.load(open("/etc/SSHPlus/ports.json")); out=[]
     for x in d.get(key,[]):
         try: v=int(x)
         except Exception: continue
         if 0<v<65536 and v not in (22,2053) and v not in out: out.append(v)
-    print(" ".join("-p %d"%p for p in out[:6]) or dflt)
+    print(" ".join("-p %d"%p for p in out[:2 if mode=="game" else 6]) or dflt)
 except Exception:
     print(dflt)
 PY
@@ -42,6 +43,7 @@ case "$MODE" in
     for i in $(seq 0 $((TLS_BACKENDS-1))); do "${DB[@]}" -p 127.0.0.1:$((P+i)) & done
     trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT
     wait -n                                   # one of them died: stop the rest, systemd restarts the unit
+    # shellcheck disable=SC2046
     kill $(jobs -p) 2>/dev/null; exit 1 ;;
   *) exec "${DB[@]}" $P ;;
 esac

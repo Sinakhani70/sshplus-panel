@@ -434,6 +434,37 @@ class SecurityHardening(unittest.TestCase):
         app.TOK.clear(); app.FAIL.clear()
 
 
+class GameAccounts(unittest.TestCase):
+    def test_shell_matrix_has_a_direct_only_game_shell(self):
+        g = app.shell_for("direct", "game")
+        self.assertTrue(g.endswith("-g")); self.assertEqual(app.SHELL_OF[g], ("direct", "game"))
+        self.assertEqual(app.shell_for("tunnel", "game"), g)                    # never a tunnel shell
+        self.assertFalse(app.is_tun(g))
+        self.assertEqual(len(set(app.SHELLS.values())), len(app.SHELLS))        # every combination has its own shell
+
+    def test_game_accounts_are_direct_only_and_need_a_port(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.PORTS; app.PORTS = os.path.join(d, "ports.json")
+            try:
+                json.dump({"db": [442], "tdb": [2087], "gdb": [4455]}, open(app.PORTS, "w"))
+                c, r = app.user_save({"u": "gx1", "pw": "abc12345", "tm": "tunnel", "cx": "game"})
+                self.assertEqual(c, 400); self.assertIn("direct-only", r["msg"])
+                json.dump({"db": [442], "tdb": [2087]}, open(app.PORTS, "w"))
+                c, r = app.user_save({"u": "gx2", "pw": "abc12345", "tm": "direct", "cx": "game"})
+                self.assertEqual(c, 400); self.assertIn("game Dropbear port", r["msg"])
+                self.assertEqual(app.game_ports(), [])
+                json.dump({"gdb": [4455, 4466, 4477, "x", 0]}, open(app.PORTS, "w")); self.assertEqual(app.game_ports(), [4455, 4466])
+            finally: app.PORTS = old
+
+    def test_game_ports_are_part_of_the_reverse_entry_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = app.PORTS; app.PORTS = os.path.join(d, "ports.json")
+            try:
+                json.dump({"db": [442], "tdb": [2087], "gdb": [4455], "ssh2": 2222}, open(app.PORTS, "w"))
+                self.assertIn(4455, app.rev_ports())
+            finally: app.PORTS = old
+
+
 class GameProfile(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.TemporaryDirectory(); d = self.d.name

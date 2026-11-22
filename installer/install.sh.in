@@ -75,8 +75,9 @@ cat > /usr/local/bin/sshplus-shell <<'EOF'
 EOF
 chmod 755 /usr/local/bin/sshplus-shell
 # tunnel accounts use their own shell (same behaviour); the shell tells which Dropbear instance accepts the account
-# account = type (direct/tunnel) x connection (both/normal/tls): -t tunnel, -n normal only, -s TLS only, -tn / -ts the tunnel variants
-ALLSH="sshplus-shell sshplus-shell-t sshplus-shell-n sshplus-shell-tn sshplus-shell-s sshplus-shell-ts"
+# account = type (direct/tunnel) x connection (both/normal/tls): -t tunnel, -n normal only, -s TLS only, -tn / -ts the tunnel variants,
+# -g game account (direct only, its own Dropbear instance and port)
+ALLSH="sshplus-shell sshplus-shell-t sshplus-shell-n sshplus-shell-tn sshplus-shell-s sshplus-shell-ts sshplus-shell-g"
 for s in $ALLSH; do
   [ "$s" = sshplus-shell ] || install -m 755 /usr/local/bin/sshplus-shell /usr/local/bin/$s
   grep -qxF "/usr/local/bin/$s" /etc/shells || echo "/usr/local/bin/$s" >> /etc/shells
@@ -87,6 +88,7 @@ shells_file direct sshplus-shell   sshplus-shell-n      # plain ports, direct ac
 shells_file tunnel sshplus-shell-t sshplus-shell-tn     # plain ports, tunnel accounts
 shells_file tlsd   sshplus-shell   sshplus-shell-s      # TLS back end, direct accounts
 shells_file tlst   sshplus-shell-t sshplus-shell-ts     # TLS back end, tunnel accounts
+shells_file game   sshplus-shell-g                      # game instance: game accounts only
 
 # quick admin password change from terminal
 cat > /usr/local/bin/sshplus-pass <<'EOF'
@@ -146,8 +148,17 @@ tdb=old_t[:4]
 for v in (2087,2096,4443,8444,2095):
     if len(tdb)>=2: break
     if v not in res and v not in db and v not in tdb: tdb.append(v)
-json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb},open(p,"w"))
-print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb)
+old_g=[]                               # game instance: keep its ports, otherwise pick one free port
+for x in d.get("gdb",[]):
+    try: v=int(x)
+    except Exception: continue
+    if 0<v<65536 and v not in res and v not in db and v not in tdb and v not in old_g: old_g.append(v)
+gdb=old_g[:2]
+for v in (4455,4466,8099,9099,7788):
+    if gdb: break
+    if v not in res and v not in db and v not in tdb: gdb.append(v)
+json.dump({"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb,"gdb":gdb},open(p,"w"))
+print("Dropbear ports:",db,"| Tunnel Dropbear ports:",tdb,"| Game Dropbear ports:",gdb)
 PY
 chmod 600 /etc/SSHPlus/panel.json /etc/SSHPlus/meta.json /root/users.db
 echo "=== STEP 1 OK ==="
@@ -246,6 +257,10 @@ cat > /etc/systemd/system/sshplus-dropbear-t.service <<'EOF'
 @@INCLUDE systemd/sshplus-dropbear-t.service@@
 EOF
 
+cat > /etc/systemd/system/sshplus-dropbear-g.service <<'EOF'
+@@INCLUDE systemd/sshplus-dropbear-g.service@@
+EOF
+
 cat > /usr/local/bin/sshplus-tls-fw <<'EOF'
 @@INCLUDE scripts/sshplus-tls-fw@@
 EOF
@@ -307,7 +322,7 @@ HTMLEOF
 sed -i "s/__VERSION__/$VERSION/g" /opt/sshplus-panel/index.html
 
 # firewall: only if ufw is active
-FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[]))))') $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/tls.json"));print(" ".join(map(str,d.get("ports",[])+d.get("tports",[]))) if d.get("on") else "")' 2>/dev/null)"
+FWP="$(sshd -T 2>/dev/null | awk '/^port /{print $2}') 2053 $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/ports.json"));print(" ".join(map(str,d["db"]+d.get("tdb",[])+d.get("gdb",[]))))') $(python3 -c 'import json;d=json.load(open("/etc/SSHPlus/tls.json"));print(" ".join(map(str,d.get("ports",[])+d.get("tports",[]))) if d.get("on") else "")' 2>/dev/null)"
 if ufw status 2>/dev/null | grep -q '^Status: active'; then
   for p in $FWP; do ufw allow "${p}/tcp" >/dev/null 2>&1; done
 fi
@@ -320,6 +335,10 @@ systemctl reset-failed sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus
 systemctl enable sshplus-panel sshplus-dropbear sshplus-dropbear-t sshplus-tunnel-net badvpn badvpn-t >/dev/null 2>&1
 systemctl restart sshplus-tunnel-net
 systemctl restart sshplus-dropbear sshplus-dropbear-t badvpn badvpn-t sshplus-panel
+# game instance (own Dropbear + port for "game" accounts): runs while ports.json has a "gdb" port
+if python3 -c 'import json,sys;sys.exit(0 if json.load(open("/etc/SSHPlus/ports.json")).get("gdb") else 1)' 2>/dev/null; then
+  systemctl enable sshplus-dropbear-g >/dev/null 2>&1; systemctl restart sshplus-dropbear-g
+fi
 # SSH over TLS stays on after an update if it was switched on from the panel
 if python3 -c 'import json,sys;sys.exit(0 if json.load(open("/etc/SSHPlus/tls.json")).get("on") else 1)' 2>/dev/null; then
   systemctl enable sshplus-dropbear-s sshplus-dropbear-ts sshplus-stunnel >/dev/null 2>&1
@@ -335,7 +354,7 @@ sleep 2
 IP=$(curl -sfL --max-time 4 https://api.ipify.org || hostname -I | awk '{print $1}')
 echo "=========================================="
 echo "Panel:     $(systemctl is-active sshplus-panel)"
-echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t))"
+echo "Dropbear:  $(systemctl is-active sshplus-dropbear)   (tunnel instance: $(systemctl is-active sshplus-dropbear-t), game instance: $(systemctl is-active sshplus-dropbear-g))"
 if systemctl is-active --quiet sshplus-stunnel; then echo "SSH-TLS:   active (Panel -> TLS tab)"; else echo "SSH-TLS:   off (Panel -> TLS tab to switch on)"; fi
 if [ -f /etc/SSHPlus/tunnel.conf ]; then echo "Tunnel:    $(systemctl is-active sshplus-tunnel)"; else echo "Tunnel:    not set up (Panel -> Tunnel tab, or: sshplus-tunnel-setup EXIT_IP)"; fi
 echo "BadVPN:    $(systemctl is-active badvpn)   (tunnel instance: $(systemctl is-active badvpn-t))"

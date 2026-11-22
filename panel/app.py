@@ -16,10 +16,15 @@ NAME_RE=re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}\Z")
 # An account = type (direct / tunnel) x connection (both / normal only / TLS only). The login shell encodes it and every Dropbear
 # instance lists only the shells it serves in its own /etc/shells (see the systemd units), so e.g. a TLS-only account is refused on the plain ports.
 SHELLS={("direct","both"):SHELL,("tunnel","both"):SHELL_T,("direct","normal"):SHELL+"-n",("tunnel","normal"):SHELL+"-tn",
-        ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts"}
+        ("direct","tls"):SHELL+"-s",("tunnel","tls"):SHELL+"-ts",
+        ("direct","game"):SHELL+"-g"}                                      # game accounts: own Dropbear instance + port, direct only
 SHELL_OF={v:k for k,v in SHELLS.items()}
 TLS_BACKENDS=6                                   # Dropbear processes per TLS instance (keep in line with scripts/start-dropbear.sh)
-def shell_for(tm,cx): return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
+def shell_for(tm,cx):
+  if cx=="game": return SHELLS[("direct","game")]
+  return SHELLS[("tunnel" if tm=="tunnel" else "direct",cx if cx in ("normal","tls") else "both")]
+def game_ports():
+  return [p for p in (to_port(x) for x in rjson(PORTS,{}).get("gdb",[])) if p][:2]
 def is_tun(sh): return SHELL_OF.get(sh,("direct",""))[0]=="tunnel"
 SSHDENY="/etc/ssh/sshd_config.d/02-sshplus-deny.conf"
 
@@ -174,7 +179,7 @@ def _on_map():
   unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>15]
   if unknown:
     for p in unknown: DBT[p]=now
-    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-n","3000","--no-pager","-o","cat"],20)
+    _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-u","sshplus-dropbear-g","-n","3000","--no-pager","-o","cat"],20)
     for jl in j.splitlines():
       mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)' from (\S+):(\d+)\s*$",jl)
       if mt: DBU[int(mt.group(1))]=mt.group(2); DBA[int(mt.group(1))]=(mt.group(3),int(mt.group(4)))
@@ -344,6 +349,7 @@ def stats():
           "bvt":cmd(["systemctl","is-active","badvpn-t"])[0]==0,
           "db":cmd(["systemctl","is-active","sshplus-dropbear"])[0]==0,
           "dbt":cmd(["systemctl","is-active","sshplus-dropbear-t"])[0]==0,
+          "dbg":cmd(["systemctl","is-active","sshplus-dropbear-g"])[0]==0 if game_ports() else None,
           "on_tot":sum(len(v) for v in om.values()),"om":{k:len(v) for k,v in om.items()}}
 
 def get_users(om):
@@ -378,7 +384,9 @@ def user_save(d):
   if not edit and not pw: return 400,{"ok":0,"msg":"Password required"}
   if not edit and days<=0: days=30
   cur=pm.get(u,(0,SHELL))[1]; ctm,ccx=SHELL_OF.get(cur,("direct","both")); tmq=str(d.get("tm","")); cxq=str(d.get("cx",""))
-  tm=tmq if tmq in ("tunnel","direct") else ctm; cx=cxq if cxq in ("both","normal","tls") else ccx
+  tm=tmq if tmq in ("tunnel","direct") else ctm; cx=cxq if cxq in ("both","normal","tls","game") else ccx
+  if cx=="game" and tm=="tunnel": return 400,{"ok":0,"msg":"Game accounts are direct-only (they cannot leave through the exit server)"}
+  if cx=="game" and not game_ports() and not (edit and ccx=="game"): return 400,{"ok":0,"msg":"No game Dropbear port is set (Settings > ports)"}
   shl=shell_for(tm,cx)                          # account type + connection type = login shell
   if tm=="tunnel" and ctm!="tunnel" and not tconf().get("TUN_HOST"):
     return 400,{"ok":0,"msg":"Tunnel is not set up yet (open the Tunnel tab first)"}
@@ -472,6 +480,13 @@ def apply_ports(d):
     else: dropped.append(str(x))
   tdb=tdb[:4]
   if not tdb: return 400,{"ok":0,"msg":"At least one valid tunnel Dropbear port is required"}
+  gdb=[]                                       # Dropbear ports of the game instance (0..2); an empty list switches the instance off
+  for x in (d["gdb"] if "gdb" in d else old.get("gdb",[])):
+    if str(x).strip()=="": continue
+    v=to_port(x)
+    if v and v not in reserved and v not in db and v not in tdb and v not in gdb: gdb.append(v)
+    else: dropped.append(str(x))
+  gdb=gdb[:2]
   bak=open(SSHCONF).read() if os.path.exists(SSHCONF) else None
   # Port lines in this file that the panel does not manage (e.g. a main SSH port such as 9011 someone put here) are kept as they are
   keep={q for q in (to_port(m) for m in re.findall(r"(?m)^Port[ \t]+(\d+)[ \t]*$",bak or "")) if q}-managed-ssh_set
@@ -485,18 +500,26 @@ def apply_ports(d):
   if rc!=0:
     if bak is not None: open(SSHCONF,"w").write(bak)
     return 400,{"ok":0,"msg":"sshd config invalid: "+er[:120]}
-  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb}); SSHP["t"]=0
-  ufw_open(ssh_set|set(db)|set(tdb)|{panel})
+  wjson(PORTS,{"ssh":s1,"ssh2":s2,"db":db,"tdb":tdb,"gdb":gdb}); SSHP["t"]=0
+  ufw_open(ssh_set|set(db)|set(tdb)|set(gdb)|{panel})
   if bak!=newtxt:                                   # sshd (and with it every SSH port, 9011 included) is only reloaded when its configuration really changed
     if cmd(["systemctl","reload","ssh"])[0]!=0: cmd(["systemctl","restart","ssh"])
-  cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+  cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"]); game_unit_sync()
   if tconf().get("TUN_HOST"): threading.Thread(target=ports_sync,daemon=True).start()
-  return 200,{"ok":1,"db":db,"tdb":tdb,"dropped":dropped}
+  return 200,{"ok":1,"db":db,"tdb":tdb,"gdb":gdb,"dropped":dropped}
+
+def game_unit_sync():
+  # the game Dropbear instance runs only while it has a port
+  if game_ports():
+    try: tls_shell_files()
+    except Exception: pass
+    cmd(["systemctl","enable","sshplus-dropbear-g"]); cmd(["systemctl","restart","sshplus-dropbear-g"])
+  else: cmd(["systemctl","disable","--now","sshplus-dropbear-g"])
 
 def save_bv(d):
   p=to_port(d.get("p")) or 7300
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[]})
-  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|tls_taken()
+  used={22,2053,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|sshd_ports()|tls_taken()
   if p in used or p+1 in used or p+1>65535: return 400,{"ok":0,"msg":"Port (or port+1, used by the tunnel UDPGW) is already used by SSH/Dropbear/panel"}
   m=min(max(int(float(d.get("m") or 1200)),576),1500)
   c=min(max(int(float(d.get("c") or 1000)),1),10000)
@@ -844,7 +867,7 @@ def tunnel_setup_run(host,port,user,pw,mode="ssh"):
     rc,o,er=_run(["ssh"]+_ssh_o(port)+[tgt,"echo ok"],t=40)
     return (True,"") if rc==0 and o.endswith("ok") else (False,"ورود با کلید ناموفق: "+(er or o)[-250:])
   def f_remote():
-    fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[])))   # this server first
+    fixed=ports_autofix(); ufw_open(set(rjson(PORTS,{}).get("db",[]))|set(rjson(PORTS,{}).get("tdb",[]))|set(game_ports()))   # this server first
     if not wg: _run(["ssh"]+_ssh_o(port)+[tgt,"systemctl disable --now sshplus-exit-wg.service >/dev/null 2>&1; ip link show tun99 2>/dev/null | grep -q . && [ -f /etc/sshplus-wg/exit.conf ] && ip link del tun99; true"],t=40)
     mp=rev_map_calc(rev_ports(),remote_listeners(host,port,user))
     ent=",".join("%d:%d"%(b,a) for a,b in sorted(mp.items()))
@@ -940,7 +963,7 @@ def rev_ports():
   # panel-server ports that can be reached through the exit server's IP: Dropbear ports (direct + tunnel) + 2nd OpenSSH port
   pc=rjson(PORTS,{}); out=[]
   tl=tls_cfg(); extra=(tl["ports"]+tl["tports"]) if tl["on"] else []              # SSH over TLS: the public TLS ports too
-  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+[pc.get("ssh2",0)]+extra:
+  for x in list(pc.get("db",[]))+list(pc.get("tdb",[]))+game_ports()+[pc.get("ssh2",0)]+extra:
     v=to_port(x)
     if v and v!=22 and v not in out: out.append(v)
   return out
@@ -949,9 +972,9 @@ def ports_autofix():
   # Dropbear ports (direct + tunnel) that another program already listens on are replaced by free ports
   pc=rjson(PORTS,{"ssh":22,"ssh2":0,"db":[],"tdb":[]}); lis=listen_ports(); foreign=foreign_ports()
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))|tls_taken()
+  used=set(lis)|{22,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|sshd_ports()|set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|tls_taken()
   changes=[]
-  for key in ("db","tdb"):
+  for key in ("db","tdb","gdb"):
     out=[]
     for x in pc.get(key,[]):
       v=to_port(x)
@@ -965,7 +988,7 @@ def ports_autofix():
   if changes:
     wjson(PORTS,pc); SSHP["t"]=0
     ufw_open({c["to"] for c in changes})
-    cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"])
+    cmd(["systemctl","restart","sshplus-dropbear"]); cmd(["systemctl","restart","sshplus-dropbear-t"]); game_unit_sync()
   return changes
 
 def remote_listeners(host,port,user):
@@ -1035,7 +1058,7 @@ def ports_sync():
   # 1) conflicts on this server  2) conflicts / mapping on the exit server  3) firewalls of BOTH servers
   rep={"ok":1,"a_changes":ports_autofix(),"map":[],"skipped":[],"fw_b":"-"}
   pc=rjson(PORTS,{})
-  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
+  tl=tls_cfg(); rep["fw_a"]=ufw_open(set(pc.get("db",[]))|set(pc.get("tdb",[]))|set(game_ports())|sshd_ports()|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set()))
   if tconf().get("TUN_HOST"):
     c,r=tunnel_route_apply("both")
     if r.get("ok"): rep["map"]=r["map"]; rep["skipped"]=r["skipped"]; rep["fw_b"]=r.get("fw_b","none")
@@ -1098,7 +1121,7 @@ def mon():
   while True:
     try:
       if n%5==0:
-        svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"]
+        svs=["sshplus-dropbear","sshplus-dropbear-t","badvpn","badvpn-t"]+(["sshplus-dropbear-g"] if game_ports() else [])
         if tconf().get("TUN_HOST"): svs.append("sshplus-tunnel")
         if tls_cfg()["on"]: svs+=list(TLS_SVC)
         for srv in svs:
@@ -1272,7 +1295,7 @@ def tls_taken(c=None):
 def tls_reserved(c=None):
   c=c or tls_cfg(); pc=rjson(PORTS,{})
   panel=to_port(rjson(CFG,{}).get("port",2053)) or 2053; bvp=to_port(read_bv().get("UDP_PORT",7300)) or 7300
-  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|sshd_ports()
+  return {22,80,panel,2053,bvp,bvp+1,to_port(pc.get("ssh")),to_port(pc.get("ssh2"))}|tls_back_ports(c)|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|set(game_ports())|sshd_ports()
 
 def cert_meta():
   rc,o,_=cmd(["openssl","x509","-in",CERT,"-noout","-subject","-issuer","-enddate"])
@@ -1349,6 +1372,9 @@ def tls_shell_files():
     fp=os.path.join(SHELLS_DIR,"shells."+k)
     with open(fp,"w") as f: f.write("\n".join(clean+[SHELLS[(tm,"both")],SHELLS[(tm,cx)]])+"\n")
     os.chmod(fp,0o644)
+  fp=os.path.join(SHELLS_DIR,"shells.game")                      # game instance: game accounts only
+  with open(fp,"w") as f: f.write("\n".join(clean+[SHELLS[("direct","game")]])+"\n")
+  os.chmod(fp,0o644)
 
 def stunnel_write(c):
   L=["; generated by the CK.VPN panel - changes are overwritten","foreground = yes","pid =","debug = 5","output = "+STUNLOG,"sslVersionMin = TLSv1.2",
@@ -1833,7 +1859,7 @@ def tpl_save(d):
   name=str(d.get("name","")).strip()[:40]
   if not name: return 400,{"ok":0,"msg":"Template name required"}
   t={"name":name,"d":max(1,int(float(d.get("d") or 30))),"q":max(0.0,float(d.get("q") or 0)),"l":max(1,int(float(d.get("l") or 1))),
-     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct","cx":d.get("cx") if d.get("cx") in ("normal","tls") else "both"}
+     "en":"B" if d.get("en")=="B" else "A","tm":"tunnel" if d.get("tm")=="tunnel" else "direct","cx":d.get("cx") if d.get("cx") in ("normal","tls","game") else "both"}
   ls=[x for x in tpl_list() if x.get("name")!=name]+[t]; wjson(TPL,ls[:60]); return 200,{"ok":1}
 
 def tpl_del(d):
@@ -1867,14 +1893,15 @@ def sub_data(u,hosthdr):
   if not x: return None
   tc=tunnel_status(False); pc=rjson(PORTS,{}); out=x["tm"]=="tunnel"; inB=x.get("en")=="B" and tc["conf"]
   host=tc["host"] if inB else re.sub(r":\d+$","",hosthdr or "")
-  dbl=list(pc.get("tdb" if out else "db",[]))
+  dbl=list(pc.get("tdb" if out else "db",[])) if x.get("cx")!="game" else game_ports()
   if inB:
     mp={r["a"]:r["b"] for r in tc["rev_map"]}; s2=pc.get("ssh2") or 0
     ssh=[mp[s2]] if s2 in mp else []; dbl=[mp[p] for p in dbl if p in mp]
   else: ssh=sorted(sshd_ports())
+  if x.get("cx")=="game": ssh=[]                                     # a game account is meant for the game port only
   x.update({"host":host,"ssh":ssh,"db":dbl,"in":"B" if inB else "A","out":"B" if out else "A","exit":(tc["exit"] or tc["host"]) if out else host})
   tl=tls_cfg(); x["tls"]=None
-  if tl["on"] and x.get("cx","both")!="normal":                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
+  if tl["on"] and x.get("cx","both") not in ("normal","game"):                    # SSH over TLS: the host is the domain if there is one (the exit server's address when entering via server 2)
     tp=list(tl["tports" if out else "ports"])
     if inB: mp2={r["a"]:r["b"] for r in tc["rev_map"]}; tp=[mp2[p] for p in tp if p in mp2]
     if tp:

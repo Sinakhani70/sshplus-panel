@@ -69,7 +69,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
     <div style="flex:1"><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="eex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
   </div>
   <div id="eHint" style="font-size:.78rem;color:var(--mu);margin:-.2rem 0 .3rem;line-height:1.8"></div>
-  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select>
+  <label>نوع اتصال</label><select id="ecx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select>
   <div id="eCx" style="font-size:.76rem;color:var(--wn);margin:-.4rem 0 .5rem;line-height:1.8"></div>
   <div style="font-size:.72rem;color:var(--wn);margin:0 0 .6rem">با تغییر In/Out اتصال‌های فعال این کاربر قطع می‌شوند.</div>
   <label>پورت پیشنهادی (فقط برای نمایش/کپی)</label><select id="ept"></select>
@@ -122,7 +122,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>رمز عبور</label><input id="npw" placeholder="123456" autocapitalize="none"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="nen" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="nex" onchange="fillPorts()"><option value="A">سرور ۱ (این سرور)</option><option value="B">سرور ۲ (سرور تانل)</option></select></div>
-      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="ncx" onchange="fillPorts()"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>پورت پیشنهادی</label><select id="npt"></select></div>
       <div><label>حجم (GB | 0=نامحدود)</label><input id="nq" type="number" step="0.5" value="0" min="0"></div>
       <div><label>روز اعتبار</label><input id="nd" type="number" value="30" min="1"></div>
@@ -144,7 +144,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>کاربر همزمان</label><input id="bu_l" type="number" value="1" min="1"></div>
       <div><label><bdi dir="ltr">In</bdi> — به کدام سرور وصل شود</label><select id="bu_en"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
       <div><label><bdi dir="ltr">Out</bdi> — با IP کدام سرور خارج شود</label><select id="bu_ex"><option value="A">سرور ۱</option><option value="B">سرور ۲</option></select></div>
-      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option></select></div>
+      <div><label>نوع اتصال</label><select id="bu_cx"><option value="both">معمولی + TLS</option><option value="normal">فقط معمولی</option><option value="tls">فقط TLS</option><option value="game">🎮 Game (پورت جدا)</option></select></div>
       <div><label>رمز (خالی = تصادفی برای هر اکانت)</label><input id="bu_pw" autocapitalize="none"></div>
     </div>
     <button class="btn" onclick="doBulk()">ایجاد اکانت‌ها</button>
@@ -335,6 +335,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>Tunnel DB 2</label><input id="td2" type="number"></div>
       <div><label>Tunnel DB 3</label><input id="td3" type="number"></div>
       <div><label>Tunnel DB 4</label><input id="td4" type="number"></div>
+      <div><label>Game DB 1 (اکانت‌های Game)</label><input id="gd1" type="number"></div>
+      <div><label>Game DB 2</label><input id="gd2" type="number"></div>
     </div>
     <button class="btn btn-s" onclick="savePorts()">ذخیره پورت‌ها (اتصال‌های Dropbear لحظه‌ای قطع می‌شوند)</button>
     <h3 style="margin:1.2rem 0 .6rem">🎮 BadVPN UDPGW</h3>
