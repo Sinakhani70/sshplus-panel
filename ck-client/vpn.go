@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/xjasonlyu/tun2socks/v2/core/adapter"
@@ -32,8 +33,14 @@ func (h *vpnHandler) HandleTCP(c adapter.TCPConn) {
 	dst := net.JoinHostPort(addrString(id.LocalAddress).String(), strconv.Itoa(int(id.LocalPort)))
 	up, err := h.t.DialTCP(dst)
 	if err != nil {
+		if n := h.badTCP.Add(1); n <= 10 {
+			h.logf("TCP -> %s failed: %v", dst, err)
+		}
 		c.Close()
 		return
+	}
+	if n := h.okTCP.Add(1); n <= 3 {
+		h.logf("TCP flow #%d from the system -> %s forwarded OK", n, dst)
 	}
 	pipe(c, up)
 }
@@ -42,6 +49,9 @@ func (h *vpnHandler) HandleUDP(c adapter.UDPConn) {
 	id := c.ID()
 	dst := netip.AddrPortFrom(addrString(id.LocalAddress), id.LocalPort)
 	defer c.Close()
+	if n := h.udpN.Add(1); n <= 3 {
+		h.logf("UDP flow #%d from the system -> %s", n, dst)
+	}
 
 	idle := 60 * time.Second
 	if dst.Port() == 53 {

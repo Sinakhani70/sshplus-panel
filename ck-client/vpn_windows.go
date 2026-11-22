@@ -232,7 +232,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 			logf("DNS forced through the tunnel (%s)", strings.Join(p.DNS, ", "))
 		}
 	}
-	run("ipconfig", "/flushdns")
+	go run("ipconfig", "/flushdns") // can stall right after the DNS rule changes - never block on it
 	logf("VPN adapter up, all traffic routed through the tunnel")
 	go selfTest(t, logf)
 	return cleanup, nil
