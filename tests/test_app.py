@@ -434,6 +434,49 @@ class SecurityHardening(unittest.TestCase):
         app.TOK.clear(); app.FAIL.clear()
 
 
+class GameProfile(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); d = self.d.name
+        self.keep = {n: getattr(app, n) for n in ("GAMEF", "GAME_SYSF", "BBRF", "cmd", "sysctl_get", "wan_dev", "root_qdisc", "bbr_state", "PORTS")}
+        app.GAMEF = os.path.join(d, "game.json"); app.GAME_SYSF = os.path.join(d, "sys.conf"); app.BBRF = os.path.join(d, "bbr.conf"); app.PORTS = os.path.join(d, "ports.json")
+        self.k = {"net.core.default_qdisc": "fq_codel", "net.ipv4.tcp_congestion_control": "cubic", "net.ipv4.tcp_notsent_lowat": "4294967295", "net.ipv4.tcp_slow_start_after_idle": "1"}
+        self.q = ["fq_codel"]; self.calls = []
+        def cmd(c, *a, **kw):
+            self.calls.append(c)
+            if c[0] == "sysctl" and c[1] == "-w": k, v = c[2].split("="); self.k[k] = v
+            if c[:3] == ["tc", "qdisc", "replace"]: self.q[0] = c[-1]
+            if c[:3] == ["tc", "qdisc", "del"]: self.q[0] = "fq_codel"
+            return 0, "", ""
+        app.cmd = cmd; app.sysctl_get = lambda k: self.k.get(k, ""); app.wan_dev = lambda: "eth0"; app.root_qdisc = lambda dev: self.q[0]
+        app.bbr_state = lambda: {"avail": True, "on": False, "cc": self.k["net.ipv4.tcp_congestion_control"], "qdisc": ""}
+    def tearDown(self):
+        for n, v in self.keep.items(): setattr(app, n, v)
+        self.d.cleanup()
+    def test_enable_applies_and_disable_restores_the_previous_values(self):
+        before = dict(self.k)
+        c, r = app.game_apply(True); self.assertEqual(c, 200)
+        self.assertEqual((self.k["net.core.default_qdisc"], self.k["net.ipv4.tcp_congestion_control"], self.k["net.ipv4.tcp_notsent_lowat"], self.k["net.ipv4.tcp_slow_start_after_idle"]), ("fq", "bbr", "16384", "0"))
+        self.assertEqual(self.q[0], "fq"); self.assertIn("tcp_notsent_lowat = 16384", open(app.GAME_SYSF).read())
+        app.game_apply(True)                                                              # a second "on" must not overwrite the saved originals
+        c, r = app.game_apply(False)
+        self.assertEqual(self.k, before); self.assertEqual(self.q[0], "fq_codel"); self.assertFalse(os.path.exists(app.GAME_SYSF))
+        self.assertFalse(json.load(open(app.GAMEF))["on"])
+    def test_missing_keys_and_no_bbr_are_reported_not_invented(self):
+        del self.k["net.ipv4.tcp_notsent_lowat"]
+        app.bbr_state = lambda: {"avail": False, "on": False, "cc": "cubic", "qdisc": ""}
+        c, r = app.game_apply(True)
+        self.assertEqual(self.k["net.ipv4.tcp_congestion_control"], "cubic")
+        self.assertTrue(any("tcp_notsent_lowat" in n for n in r["notes"])); self.assertTrue(any("BBR" in n for n in r["notes"]))
+        self.assertNotIn("tcp_notsent_lowat", open(app.GAME_SYSF).read())
+    def test_sshd_text_scopes_ipqos_to_the_panel_ports(self):
+        open(app.PORTS, "w").write(json.dumps({"ssh": 22, "ssh2": 2222}))
+        t = app.game_sshd_text(False)
+        self.assertIn("Match LocalPort 22\n  IPQoS lowdelay", t); self.assertIn("Match LocalPort 2222\n  IPQoS lowdelay", t)
+        self.assertIsNone(re.search(r"(?m)^Ciphers ", t)); self.assertNotIn("9011", t)
+        self.assertIsNotNone(re.search(r"(?m)^Ciphers chacha20-poly1305@openssh.com,aes128-gcm@openssh.com$", app.game_sshd_text(True)))
+        self.assertTrue(t.rstrip().endswith("IPQoS lowdelay"))                            # Match blocks last: nothing after them is swallowed
+
+
 class ExitUpdate(unittest.TestCase):
     def test_needs_a_tunnel_and_keeps_route_mode(self):
         src = open(os.path.join(os.path.dirname(__file__), "..", "panel", "app.py"), encoding="utf-8").read()

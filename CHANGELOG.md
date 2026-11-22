@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased (gaming: stable ping)
+### Added
+- **Game Profile** (Settings): one switch applies `net.core.default_qdisc=fq`, `tcp_congestion_control=bbr`, `tcp_notsent_lowat=16384`, `tcp_slow_start_after_idle=0` and replaces the root qdisc of the WAN interface with `fq` (the sysctl only affects qdiscs created later). The previous runtime values are saved and restored exactly when it is switched off. Keys the kernel does not have and a missing BBR/`fq` are reported, never claimed; the BBR toggle is locked while the profile is on. The live state (current value vs. target, qdisc) is shown. Saved in `/etc/sysctl.d/99-sshplus-game.conf` (and `tcp_bbr` is loaded at boot).
+- **OpenSSH tuning** (separate, explicit button; reloads sshd once): `Compression no`, `UseDNS no` (both can only be global in sshd, so they also apply to other SSH ports such as a main one), `IPQoS lowdelay` limited to the panel's own SSH ports with `Match LocalPort` (verified: a different port keeps its defaults), and optionally only the light ciphers `chacha20-poly1305` + `aes128-gcm` (global, may break old clients). Dropbear has no such settings (it has no `aes128-gcm` and no runtime cipher option).
+- UDPGW settings: **send buffer** (`--client-socket-sndbuf`, 0..16 MB, 0 = system default) next to MTU / max clients / max connections per client.
 ### Security
 - **Panel: stalled or oversized requests.** A client that completed the TLS handshake and then stalled was never timed out (a held thread each). Every connection now has a 30 s idle timeout; a negative or non-numeric `Content-Length` is refused (400), bodies above 1 MB (32 MB for `/api/restore`) are refused (413) before anything is read. Checked: the 40 s stall test now ends after 30 s.
 - **Optional panel IP allowlist** (Settings): addresses or ranges (IPv4/IPv6); empty = everybody. A list that excludes your own address is refused, users' subscription links (`/s/…`) stay reachable, and `python3 /opt/sshplus-panel/app.py --allow-off` clears it from the server.

@@ -280,6 +280,21 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </div>
 
 <div id="secS" class="hid">
+  <div class="card" id="gameCard">
+    <h3 style="margin-bottom:.6rem;color:var(--pr)">🎮 Game Profile (پینگ پایدار)</h3>
+    <div style="font-size:.78rem;color:var(--mu);line-height:1.9;margin-bottom:.6rem">فقط تنظیمات صف و ارسال همین سرور را برای تأخیر کمتر عوض می‌کند: fq به‌جای صف پیش‌فرض، BBR، tcp_notsent_lowat=16384 و tcp_slow_start_after_idle=0. مقدارهای قبلی ذخیره می‌شوند و با خاموش کردن دقیقاً برمی‌گردند. این تنظیمات جیتر مسیر اپراتور گوشی تا سرور را درست نمی‌کنند؛ برای تشخیص آن از «مانیتور شبکه» استفاده کن.</div>
+    <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.6rem"><input type="checkbox" id="gameOn" style="width:auto;margin:.2rem 0 0" onchange="gameToggle()"><span>فعال‌سازی Game Profile</span></label>
+    <div id="gameKeys" style="font-size:.76rem;line-height:1.9;direction:ltr;text-align:left;margin-bottom:.4rem"></div>
+    <div id="gameNotes" style="font-size:.76rem;color:var(--wn);line-height:1.8;margin-bottom:.6rem"></div>
+    <div style="border-top:1px solid var(--bd);padding-top:.7rem;margin-top:.4rem">
+      <b style="font-size:.85rem">تنظیمات OpenSSH (اختیاری)</b>
+      <div style="font-size:.76rem;color:var(--mu);line-height:1.9;margin:.4rem 0">Compression no و UseDNS no در sshd فقط به‌صورت سراسری ممکن‌اند و روی همه‌ی پورت‌های SSH (پورت اصلی شما هم) اثر می‌گذارند. IPQoS lowdelay فقط روی پورت‌های SSH همین پنل اعمال می‌شود. اعمال، sshd را reload می‌کند (نشست‌های باز قطع نمی‌شوند). Dropbear به این تنظیمات ربطی ندارد.</div>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameSshd" style="width:auto;margin:.2rem 0 0"><span>اعمال Compression no، UseDNS no و IPQoS lowdelay روی OpenSSH</span></label>
+      <label style="display:flex;gap:.4rem;align-items:flex-start;color:var(--tx);margin-bottom:.3rem"><input type="checkbox" id="gameCip" style="width:auto;margin:.2rem 0 0"><span>فقط رمزهای سبک chacha20-poly1305 و aes128-gcm (روی همه‌ی پورت‌های OpenSSH؛ کلاینت‌های قدیمی ممکن است وصل نشوند)</span></label>
+      <button class="btn btn-s btn-w" onclick="gameSshdApply()">اعمال روی OpenSSH (sshd را reload می‌کند)</button>
+    </div>
+  </div>
+
   <div class="g2">
     <div class="card">
       <h3 style="margin-bottom:.7rem;color:var(--pr)">🚀 BBR (کنترل ازدحام TCP)</h3>
@@ -328,6 +343,7 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
       <div><label>UDP MTU</label><input id="bm" type="number"></div>
       <div><label>Max Clients</label><input id="bc" type="number"></div>
       <div><label>Max Conn / Client</label><input id="bn" type="number"></div>
+      <div><label>Send buffer (بایت، ۰ = پیش‌فرض)</label><input id="bs" type="number" min="0" max="16777216"></div>
       <div><label>Bind</label><select id="bb"><option value="127.0.0.1">127.0.0.1 (امن)</option><option value="0.0.0.0">0.0.0.0 (عمومی)</option></select></div>
     </div>
     <button class="btn btn-s btn-w" onclick="saveBv()">ذخیره و ری‌استارت BadVPN</button>
