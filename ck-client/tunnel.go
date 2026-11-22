@@ -33,6 +33,7 @@ type Tunnel struct {
 	wg     sync.WaitGroup
 
 	Up, Down  atomic.Int64
+	ping      atomic.Int64 // last latency in ms, -1 = unknown
 	connected atomic.Bool
 	lastErr   atomic.Value // string
 }
@@ -41,6 +42,7 @@ func NewTunnel(p *Profile, st *Store, logf func(string, ...any)) *Tunnel {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &Tunnel{p: p, store: st, log: logf, ctx: ctx, cancel: cancel, ready: make(chan struct{})}
 	t.gw = NewUDPGW(t.dialUDPGW)
+	t.ping.Store(-1)
 	return t
 }
 
@@ -59,9 +61,73 @@ func (t *Tunnel) Start() error {
 		return err
 	}
 	t.setClient(c)
-	t.wg.Add(1)
+	t.wg.Add(2)
 	go t.supervise(c)
+	go t.pingLoop()
 	return nil
+}
+
+// PingMs returns the latest latency in milliseconds, or -1 if unknown.
+func (t *Tunnel) PingMs() int64 { return t.ping.Load() }
+
+func (t *Tunnel) pingLoop() {
+	defer t.wg.Done()
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-tick.C:
+			if ms, err := t.measurePing(); err == nil {
+				t.ping.Store(ms)
+			} else {
+				t.ping.Store(-1)
+			}
+		}
+	}
+}
+
+// measurePing times a TCP connect to the ping target through the tunnel
+// (you -> server -> target). With target "off" it times an SSH round trip.
+func (t *Tunnel) measurePing() (int64, error) {
+	c, err := t.getClient(0)
+	if err != nil {
+		return -1, err
+	}
+	type res struct {
+		d   time.Duration
+		err error
+	}
+	ch := make(chan res, 1)
+	start := time.Now()
+	target := t.p.PingTarget
+	go func() {
+		if target == "" || target == "off" {
+			_, _, err := c.SendRequest("keepalive@openssh.com", true, nil)
+			ch <- res{time.Since(start), err}
+			return
+		}
+		conn, err := c.Dial("tcp", target)
+		d := time.Since(start)
+		if conn != nil {
+			conn.Close()
+		}
+		ch <- res{d, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return -1, r.err
+		}
+		ms := r.d.Milliseconds()
+		if ms < 1 {
+			ms = 1
+		}
+		return ms, nil
+	case <-time.After(5 * time.Second):
+		return -1, errors.New("ping timeout")
+	}
 }
 
 func (t *Tunnel) Stop() {

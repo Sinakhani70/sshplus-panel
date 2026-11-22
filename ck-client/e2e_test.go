@@ -173,3 +173,33 @@ func TestHostKeyChangeRejected(t *testing.T) {
 		t.Fatal("expected host key mismatch error")
 	}
 }
+
+func TestPingMeasurement(t *testing.T) {
+	sshAddr := startSSHServer(t)
+	eln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer eln.Close()
+	go func() {
+		for {
+			c, err := eln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	host, portS, _ := net.SplitHostPort(sshAddr)
+	port, _ := strconv.Atoi(portS)
+	for _, target := range []string{eln.Addr().String(), "off"} {
+		p := &Profile{Name: "t", Host: host, Port: port, User: "u", Password: "p", PingTarget: target}
+		p.applyDefaults()
+		tun := NewTunnel(p, &Store{path: t.TempDir() + "/p.json"}, t.Logf)
+		if err := tun.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ms, err := tun.measurePing()
+		tun.Stop()
+		if err != nil || ms < 1 || ms > 2000 {
+			t.Fatalf("target %q: ping %d err %v", target, ms, err)
+		}
+	}
+}

@@ -22,7 +22,8 @@ type Profile struct {
 	Mode         string   `json:"mode"`      // "vpn" | "proxy"
 	SocksPort    int      `json:"socksPort"`
 	DNS          []string `json:"dns,omitempty"`
-	HostKey      string   `json:"hostKey,omitempty"` // pinned SHA256 fingerprint (TOFU)
+	PingTarget   string   `json:"pingTarget,omitempty"` // host:port measured through the tunnel; "off" = SSH server only
+	HostKey      string   `json:"hostKey,omitempty"`    // pinned SHA256 fingerprint (TOFU)
 }
 
 func (p *Profile) applyDefaults() {
@@ -40,6 +41,9 @@ func (p *Profile) applyDefaults() {
 	}
 	if p.SocksPort == 0 {
 		p.SocksPort = 10808
+	}
+	if p.PingTarget == "" {
+		p.PingTarget = "1.1.1.1:443"
 	}
 	if len(p.DNS) == 0 {
 		p.DNS = []string{"1.1.1.1", "8.8.8.8"}

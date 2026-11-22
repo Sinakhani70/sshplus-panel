@@ -5,6 +5,7 @@ Native Windows x64 desktop app (no browser, no web UI) for the SSH Plus panel: *
 - **VPN mode** – creates a virtual adapter (Wintun), routes all TCP/UDP traffic through the SSH server. UDP (games, calls, DNS) goes through UDPGW.
 - **Proxy mode** – local SOCKS5 on `127.0.0.1:<port>` (TCP + UDP ASSOCIATE via UDPGW) and sets the Windows system proxy.
 - SSH over plain TCP or **TLS with custom SNI**, password or private-key login.
+- Live **ping** on the main card (TCP connect time to a target of your choice through the tunnel, default 1.1.1.1:443; set the profile's ping target to `off` to time the SSH server only). Green < 120 ms, yellow < 300 ms, red above.
 - Auto-reconnect with keep-alive; VPN routes stay in place while reconnecting (no leak to the open internet).
 - Server host key pinned on first connect (trust-on-first-use); a changed key is refused.
 

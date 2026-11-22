@@ -124,6 +124,7 @@ type Snapshot struct {
 	State, Err, Active string
 	Up, Down           int64
 	Link               bool
+	PingMs             int64
 	Since              time.Time
 	Logs               []string
 }
@@ -131,9 +132,9 @@ type Snapshot struct {
 func (a *App) Snapshot() Snapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Snapshot{State: a.state, Err: a.errMsg, Active: a.active, Since: a.started, Logs: a.logs.Snapshot()}
+	s := Snapshot{PingMs: -1, State: a.state, Err: a.errMsg, Active: a.active, Since: a.started, Logs: a.logs.Snapshot()}
 	if a.tunnel != nil {
-		s.Up, s.Down, s.Link = a.tunnel.Up.Load(), a.tunnel.Down.Load(), a.tunnel.Connected()
+		s.Up, s.Down, s.Link, s.PingMs = a.tunnel.Up.Load(), a.tunnel.Down.Load(), a.tunnel.Connected(), a.tunnel.PingMs()
 	}
 	return s
 }

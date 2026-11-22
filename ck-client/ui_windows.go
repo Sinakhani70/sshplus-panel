@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	_ "image/png"
+	"net"
 	"strconv"
 	"strings"
 	"syscall"
@@ -375,6 +376,9 @@ func (g *gui) refresh() {
 	}
 	if g.ni != nil {
 		tip := appName + " - " + stateText(s.State)
+		if s.State == "connected" && s.PingMs >= 0 {
+			tip += fmt.Sprintf(" - %d ms", s.PingMs)
+		}
 		g.ni.SetToolTip(tip)
 	}
 }
@@ -449,19 +453,35 @@ func (g *gui) paintHero(c *walk.Canvas, _ walk.Rectangle) error {
 	}
 
 	// stats
-	link := "-"
+	ping, pingCol := "-", cText
 	if g.snap.State == "connected" {
-		link = "OK"
-		if !g.snap.Link {
-			link = "Reconnecting"
+		switch ms := g.snap.PingMs; {
+		case !g.snap.Link:
+			ping, pingCol = "reconnecting", cWarn
+		case ms < 0:
+			ping, pingCol = "...", cMuted
+		default:
+			ping = fmt.Sprintf("%d ms", ms)
+			switch {
+			case ms < 120:
+				pingCol = cOK
+			case ms < 300:
+				pingCol = cWarn
+			default:
+				pingCol = cErr
+			}
 		}
 	}
-	stats := [][2]string{{"UPLOAD", fmtBytes(g.snap.Up)}, {"DOWNLOAD", fmtBytes(g.snap.Down)}, {"SSH LINK", link}}
+	stats := [][2]string{{"UPLOAD", fmtBytes(g.snap.Up)}, {"DOWNLOAD", fmtBytes(g.snap.Down)}, {"PING", ping}}
 	cw := (card.Width - px(36)) / 3
 	for i, s := range stats {
 		x := card.X + px(18) + i*cw
 		c.DrawTextPixels(s[0], font(8, 0), cMuted, walk.Rectangle{X: x, Y: card.Y + px(92), Width: cw, Height: px(18)}, walk.TextLeft|walk.TextSingleLine)
-		c.DrawTextPixels(s[1], font(11, walk.FontBold), cText, walk.Rectangle{X: x, Y: card.Y + px(110), Width: cw, Height: px(26)}, walk.TextLeft|walk.TextSingleLine)
+		vc := cText
+		if i == 2 {
+			vc = pingCol
+		}
+		c.DrawTextPixels(s[1], font(11, walk.FontBold), vc, walk.Rectangle{X: x, Y: card.Y + px(110), Width: cw, Height: px(26)}, walk.TextLeft|walk.TextSingleLine)
 	}
 	return nil
 }
@@ -547,6 +567,8 @@ func (g *gui) edit(p *Profile) {
 	eGW := input(p.UdpgwAddr)
 	label("DNS servers (comma separated)")
 	eDNS := input(strings.Join(p.DNS, ","))
+	label("Ping target host:port (measured through the tunnel; \"off\" = SSH server only)")
+	ePing := input(p.PingTarget)
 	label("Local SOCKS5 port (proxy mode)")
 	eSocks := input(strconv.Itoa(p.SocksPort))
 
@@ -569,11 +591,17 @@ func (g *gui) edit(p *Profile) {
 			User: strings.TrimSpace(eUser.Text()), Password: ePass.Text(), PrivateKey: strings.TrimSpace(eKey.Text()),
 			Mode: []string{"vpn", "proxy"}[max(cMode.CurrentIndex(), 0)], Transport: []string{"direct", "tls"}[max(cTr.CurrentIndex(), 0)],
 			SNI: strings.TrimSpace(eSNI.Text()), UdpgwEnabled: cGW.CurrentIndex() == 0, UdpgwAddr: strings.TrimSpace(eGW.Text()),
-			SocksPort: sp,
+			SocksPort: sp, PingTarget: strings.TrimSpace(ePing.Text()),
 		}
 		for _, d := range strings.Split(eDNS.Text(), ",") {
 			if d = strings.TrimSpace(d); d != "" {
 				np.DNS = append(np.DNS, d)
+			}
+		}
+		if pt := strings.ToLower(np.PingTarget); pt != "" && pt != "off" {
+			if _, _, err := net.SplitHostPort(np.PingTarget); err != nil {
+				walk.MsgBox(dlg, appName, "Ping target must look like host:port (for example 1.1.1.1:443) or \"off\".", walk.MsgBoxIconWarning)
+				return
 			}
 		}
 		if np.Name == "" || np.Host == "" || np.User == "" {
