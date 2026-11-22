@@ -265,6 +265,8 @@ func selfTest(t *Tunnel, logf func(string, ...any)) {
 				return strings.TrimSpace(strings.TrimPrefix(l, "ip="))
 			}
 		}
+		first, _, _ := strings.Cut(string(b), "\n")
+		logf("self-test: no IP in the reply (got %d bytes, first line: %q)", len(b), strings.TrimSpace(first))
 		return ""
 	}
 	var viaSSH, viaOS string

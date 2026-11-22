@@ -30,7 +30,12 @@ func addrString(a tcpip.Address) netip.Addr {
 	return ip.Unmap()
 }
 
-func (h *vpnHandler) HandleTCP(c adapter.TCPConn) {
+// The gVisor forwarder calls HandleTCP/HandleUDP on its packet-processing
+// goroutine, so they must return immediately: all real work runs in a new goroutine.
+func (h *vpnHandler) HandleTCP(c adapter.TCPConn) { go h.handleTCP(c) }
+func (h *vpnHandler) HandleUDP(c adapter.UDPConn) { go h.handleUDP(c) }
+
+func (h *vpnHandler) handleTCP(c adapter.TCPConn) {
 	id := c.ID()
 	dst := net.JoinHostPort(addrString(id.LocalAddress).String(), strconv.Itoa(int(id.LocalPort)))
 	up, err := h.t.DialTCP(dst)
@@ -47,7 +52,7 @@ func (h *vpnHandler) HandleTCP(c adapter.TCPConn) {
 	pipe(c, up)
 }
 
-func (h *vpnHandler) HandleUDP(c adapter.UDPConn) {
+func (h *vpnHandler) handleUDP(c adapter.UDPConn) {
 	id := c.ID()
 	dst := netip.AddrPortFrom(addrString(id.LocalAddress), id.LocalPort)
 	defer c.Close()
