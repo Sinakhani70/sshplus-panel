@@ -151,6 +151,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 			r := added[i]
 			run("route", "delete", r.dest, "mask", r.mask, r.gw)
 		}
+		removeNRPT()
 		stack.Close()
 		dev.Close()
 		os.Remove(stateFile())
@@ -172,13 +173,26 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 	}
 	run("netsh", "interface", "ipv4", "set", "interface", tunName, "metric=1")
 
+	tunIdx := ""
+	for i := 0; i < 20 && tunIdx == ""; i++ {
+		if ifc, err := net.InterfaceByName(tunName); err == nil {
+			tunIdx = strconv.Itoa(ifc.Index)
+		} else {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if tunIdx == "" {
+		return fail(errors.New("adapter \"" + tunName + "\" did not appear"))
+	}
+	logf("adapter %s index %s", tunName, tunIdx)
+
 	addRoute := func(r route, extra ...string) error {
 		args := append([]string{"add", r.dest, "mask", r.mask, r.gw, "metric", "1"}, extra...)
 		if out, err := run("route", args...); err != nil {
 			return fmt.Errorf("route add %s: %v %s", r.dest, err, out)
 		}
 		added = append(added, r)
-		os.WriteFile(stateFile(), []byte(srv+"\n"+gw+"\n"), 0o600)
+		os.WriteFile(stateFile(), []byte(srv+"\n"+gw+"\nnrpt\n"), 0o600)
 		return nil
 	}
 	// the SSH connection itself must keep using the real network
@@ -188,7 +202,7 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 		}
 	}
 	for _, r := range []route{{"0.0.0.0", "128.0.0.0", tunGW}, {"128.0.0.0", "128.0.0.0", tunGW}} {
-		if err := addRoute(r); err != nil {
+		if err := addRoute(r, "if", tunIdx); err != nil {
 			return fail(err)
 		}
 	}
@@ -204,9 +218,73 @@ func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) 
 			run("netsh", "interface", "ipv4", "add", "dnsservers", "name="+tunName, d, "index="+strconv.Itoa(i+1), "validate=no")
 		}
 	}
+	// Windows asks every adapter's DNS in parallel and the ISP's (often poisoned)
+	// answer wins; a catch-all NRPT rule makes it use only our DNS servers.
+	if len(p.DNS) > 0 {
+		quoted := make([]string, len(p.DNS))
+		for i, d := range p.DNS {
+			quoted[i] = "'" + strings.ReplaceAll(d, "'", "") + "'"
+		}
+		if out, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			"Add-DnsClientNrptRule -Namespace '.' -NameServers "+strings.Join(quoted, ",")+" -Comment 'CKClient'"); err != nil {
+			logf("warning: could not force DNS through the tunnel: %v %s", err, out)
+		} else {
+			logf("DNS forced through the tunnel (%s)", strings.Join(p.DNS, ", "))
+		}
+	}
 	run("ipconfig", "/flushdns")
 	logf("VPN adapter up, all traffic routed through the tunnel")
+	go selfTest(t, logf)
 	return cleanup, nil
+}
+
+func removeNRPT() {
+	run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-DnsClientNrptRule | Where-Object { $_.Comment -eq 'CKClient' } | Remove-DnsClientNrptRule -Force")
+	run("ipconfig", "/flushdns")
+}
+
+// selfTest logs the exit IP seen through the SSH tunnel and the one seen by a
+// normal Windows connection; if they differ the OS routes are not effective.
+func selfTest(t *Tunnel, logf func(string, ...any)) {
+	time.Sleep(2 * time.Second)
+	trace := func(c net.Conn) string {
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(8 * time.Second))
+		fmt.Fprint(c, "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n")
+		b, _ := io.ReadAll(c)
+		for _, l := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(l, "ip=") {
+				return strings.TrimSpace(strings.TrimPrefix(l, "ip="))
+			}
+		}
+		return ""
+	}
+	var viaSSH, viaOS string
+	if c, err := t.DialTCP("1.1.1.1:80"); err != nil {
+		logf("self-test: server refused to forward TCP (%v) - check AllowTcpForwarding on the server", err)
+	} else {
+		viaSSH = trace(c)
+		logf("self-test: exit IP through the SSH tunnel: %s", viaSSH)
+	}
+	if c, err := net.DialTimeout("tcp", "1.1.1.1:80", 8*time.Second); err != nil {
+		logf("self-test: normal Windows connection failed: %v", err)
+	} else {
+		viaOS = trace(c)
+		logf("self-test: exit IP seen by Windows apps: %s", viaOS)
+	}
+	if viaSSH != "" && viaOS != "" && viaSSH != viaOS {
+		logf("WARNING: Windows traffic is NOT going through the tunnel. Routing table:")
+		if out, err := run("route", "print", "-4"); err == nil {
+			for _, l := range strings.Split(out, "\n") {
+				if f := strings.Fields(l); len(f) >= 5 && (strings.HasPrefix(l, "          0.0.0.0") || strings.HasPrefix(l, "        128.0.0.0") || strings.Contains(l, tunGW)) {
+					logf("  %s", strings.Join(f, " "))
+				}
+			}
+		}
+	} else if viaSSH != "" && viaSSH == viaOS {
+		logf("self-test OK: Windows traffic leaves through the server")
+	}
 }
 
 func stateFile() string { return filepath.Join(configDir(), "routes.state") }
@@ -218,7 +296,10 @@ func cleanupStale(logf func(string, ...any)) {
 		return
 	}
 	f := strings.Fields(string(b))
-	if len(f) == 2 {
+	if len(f) == 3 {
+		removeNRPT()
+	}
+	if len(f) >= 2 {
 		run("route", "delete", f[0], "mask", "255.255.255.255", f[1])
 		logf("removed stale route to %s", f[0])
 	}
