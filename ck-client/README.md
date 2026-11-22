@@ -27,6 +27,9 @@ Closing the window while connected hides it to the tray (right-click the tray ic
 ./build.sh        # tests + cross-compile -> dist/ck-client.exe
 ```
 
+## iOS
+A first iOS implementation (SwiftUI + Network Extension on the shared Go core `ckcore/`) is in [`ios/`](ios/README.md); it needs a Mac, Xcode and a paid Apple Developer account, and has not been run on a device yet.
+
 ## Notes / limits
 - Profiles (including passwords) are stored in `%APPDATA%\CKClient\profiles.json`, readable by your Windows user only by file permissions – not encrypted.
 - Windows may still send DNS queries to other adapters in parallel (smart multi-homed resolution); if DNS leaks matter, disable it in group policy or use proxy mode with DoH.

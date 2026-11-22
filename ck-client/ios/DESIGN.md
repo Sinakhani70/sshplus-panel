@@ -1,6 +1,6 @@
 # CK Client for iOS — design
 
-Status: **design only**. No iOS code has been written or built (this needs a Mac with Xcode and an Apple Developer account). The Windows app in `ck-client/` is the reference; this document says what carries over, what changes and what blocks.
+Status: the shared Go core (`../ckcore`, tested) and the Swift sources (this folder) are written — see [README.md](README.md) — but the Swift code has **never been compiled or run** (no Mac here). The Windows app in `ck-client/` is the reference; this document says what carries over, what changes and what blocks.
 
 ![mockup](mockup.png)
 
