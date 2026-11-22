@@ -2,6 +2,10 @@
 
 One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear + BadVPN UDPGW + BBR**, a **two-server tunnel**, and a web panel (**CK.VPN**) for managing accounts.
 
+**Windows client:** connect to this panel's servers with the **CK Client** app (SSH + UDPGW, VPN or proxy mode): **[⬇ Download CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [details](https://github.com/Sinakhani70/sshplus-panel/tree/claude/fervent-einstein-ffsqxa/ck-client).
+
+**کلاینت ویندوز:** برای اتصال به سرورهای همین پنل از برنامه‌ی **CK Client** استفاده کن: **[⬇ دانلود CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)**.
+
 **Language: [English](#english) | [فارسی](#فارسی)**
 
 ---
@@ -85,6 +89,9 @@ The version is shown next to the logo, so you always know what is installed.
 
 ### Updating
 Run the same install command again on server 1. Users, ports, tunnel, passwords and settings are kept. The panel re-applies the exit-server side by itself a few seconds after it starts. After updating from a version older than 1.5 the panel address is `https://`.
+
+### Windows client
+Use the **CK Client** app to connect from Windows to the accounts of this panel (SSH + UDPGW, VPN or proxy mode): **[⬇ Download CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [details](https://github.com/Sinakhani70/sshplus-panel/tree/claude/fervent-einstein-ffsqxa/ck-client). Enter an account's server, SSH port, username and password and keep UDPGW on `127.0.0.1:7300`.
 
 ### Tunnel
 
@@ -304,6 +311,9 @@ Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must ch
 
 ### آپدیت
 همان دستور نصب را دوباره روی سرور ۱ اجرا کن. کاربران، پورت‌ها، تانل، رمزها و تنظیمات حفظ می‌شوند. چند ثانیه بعد از بالا آمدن پنل، سمت سرور خروجی را خودش دوباره اعمال می‌کند. بعد از آپدیت از نسخه‌های قدیمی‌تر از ۱.۵، آدرس پنل `https://` است.
+
+### کلاینت ویندوز
+برای اتصال از ویندوز به اکانت‌های همین پنل از برنامه‌ی **CK Client** استفاده کن (SSH + UDPGW، حالت VPN یا پراکسی): **[⬇ دانلود CK Client](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [توضیحات](https://github.com/Sinakhani70/sshplus-panel/tree/claude/fervent-einstein-ffsqxa/ck-client). آدرس سرور، پورت SSH، نام کاربری و رمز اکانت را وارد کن و UDPGW را روی `127.0.0.1:7300` روشن بگذار.
 
 ### تانل
 
