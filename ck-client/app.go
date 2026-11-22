@@ -1,31 +1,17 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
-	"os"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	_ "embed"
 )
-
-//go:embed ui/index.html
-var indexHTML []byte
 
 const appName = "CK Client"
 
 type App struct {
 	store *Store
 	logs  LogBuf
-	token string
 
 	mu       sync.Mutex
 	state    string // idle | connecting | connected | error
@@ -36,14 +22,10 @@ type App struct {
 	socks    *Socks
 	stopVPN  func()
 	sysProxy bool
-
-	lastPoll atomic.Int64
 }
 
 func NewApp() *App {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return &App{store: OpenStore(), token: hex.EncodeToString(b), state: "idle"}
+	return &App{store: OpenStore(), state: "idle"}
 }
 
 func (a *App) logf(f string, args ...any) { a.logs.Add(fmt.Sprintf(f, args...)) }
@@ -137,144 +119,21 @@ func (a *App) Disconnect() {
 	a.logf("disconnected")
 }
 
-// ---------- HTTP API (127.0.0.1 only, protected by a random token) ----------
-
-type profileView struct {
-	Profile
-	Password    string `json:"password"`
-	PrivateKey  string `json:"privateKey"`
-	HasPassword bool   `json:"hasPassword"`
-	HasKey      bool   `json:"hasKey"`
+// Snapshot is what the UI shows.
+type Snapshot struct {
+	State, Err, Active string
+	Up, Down           int64
+	Link               bool
+	Since              time.Time
+	Logs               []string
 }
 
-func (a *App) Handler(port int) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(indexHTML)
-	})
-	api := func(path string, h func(w http.ResponseWriter, r *http.Request)) {
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("X-CK-Token") != a.token {
-				http.Error(w, "forbidden", 403)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			h(w, r)
-		})
+func (a *App) Snapshot() Snapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := Snapshot{State: a.state, Err: a.errMsg, Active: a.active, Since: a.started, Logs: a.logs.Snapshot()}
+	if a.tunnel != nil {
+		s.Up, s.Down, s.Link = a.tunnel.Up.Load(), a.tunnel.Down.Load(), a.tunnel.Connected()
 	}
-	reply := func(w http.ResponseWriter, v any, err error) {
-		if err != nil {
-			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(v)
-	}
-	api("/api/state", func(w http.ResponseWriter, r *http.Request) {
-		a.lastPoll.Store(time.Now().Unix())
-		a.mu.Lock()
-		st := map[string]any{"state": a.state, "error": a.errMsg, "active": a.active, "logs": a.logs.Snapshot()}
-		if a.tunnel != nil {
-			st["up"], st["down"] = a.tunnel.Up.Load(), a.tunnel.Down.Load()
-			st["link"] = a.tunnel.Connected()
-			st["since"] = a.started.Unix()
-		}
-		a.mu.Unlock()
-		json.NewEncoder(w).Encode(st)
-	})
-	api("/api/profiles", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			out := []profileView{}
-			for _, p := range a.store.List() {
-				v := profileView{Profile: *p, HasPassword: p.Password != "", HasKey: p.PrivateKey != ""}
-				v.Password, v.PrivateKey = "", ""
-				out = append(out, v)
-			}
-			json.NewEncoder(w).Encode(out)
-		case "POST":
-			var p Profile
-			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
-				reply(w, nil, err)
-				return
-			}
-			p.Name, p.Host, p.User = strings.TrimSpace(p.Name), strings.TrimSpace(p.Host), strings.TrimSpace(p.User)
-			if p.Name == "" || p.Host == "" || p.User == "" {
-				reply(w, nil, errors.New("name, host and username are required"))
-				return
-			}
-			if old := a.store.Get(p.Name); old != nil { // blank secret fields keep the stored value
-				if p.Password == "" {
-					p.Password = old.Password
-				}
-				if p.PrivateKey == "" {
-					p.PrivateKey = old.PrivateKey
-				}
-			}
-			reply(w, map[string]bool{"ok": true}, a.store.Put(&p))
-		case "DELETE":
-			reply(w, map[string]bool{"ok": true}, a.store.Delete(r.URL.Query().Get("name")))
-		}
-	})
-	api("/api/connect", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Name string }
-		json.NewDecoder(r.Body).Decode(&req)
-		go a.Connect(req.Name)
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
-	api("/api/disconnect", func(w http.ResponseWriter, r *http.Request) {
-		go a.Disconnect()
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
-	api("/api/quit", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-		go func() { a.Disconnect(); os.Exit(0) }()
-	})
-	api("/api/forget-hostkey", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Name string }
-		json.NewDecoder(r.Body).Decode(&req)
-		a.store.PinHostKey(req.Name, "")
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	})
-
-	// Reject DNS-rebinding: only accept our exact loopback host.
-	want := fmt.Sprintf("127.0.0.1:%d", port)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != want {
-			http.Error(w, "bad host", 403)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
-}
-
-func (a *App) Serve() (url string, err error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	go http.Serve(ln, a.Handler(port))
-	return fmt.Sprintf("http://127.0.0.1:%d/#%s", port, a.token), nil
-}
-
-// Watchdog: if the UI window is closed (no polling for a while) undo routes /
-// proxy settings and exit, so nothing is left half-configured.
-func (a *App) Watchdog(after time.Duration) {
-	a.lastPoll.Store(time.Now().Unix())
-	go func() {
-		for range time.Tick(10 * time.Second) {
-			if time.Since(time.Unix(a.lastPoll.Load(), 0)) > after {
-				a.logf("UI closed - shutting down")
-				a.Disconnect()
-				os.Exit(0)
-			}
-		}
-	}()
+	return s
 }

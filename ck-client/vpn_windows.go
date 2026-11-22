@@ -49,19 +49,6 @@ func isAdmin() bool {
 	return err == nil && m
 }
 
-// relaunchAsAdmin restarts the program elevated (UAC prompt). Returns true if started.
-func relaunchAsAdmin() bool {
-	exe, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	verb, _ := syscall.UTF16PtrFromString("runas")
-	file, _ := syscall.UTF16PtrFromString(exe)
-	args, _ := syscall.UTF16PtrFromString(strings.Join(os.Args[1:], " "))
-	dir, _ := syscall.UTF16PtrFromString(filepath.Dir(exe))
-	return windows.ShellExecute(0, verb, file, args, dir, windows.SW_NORMAL) == nil
-}
-
 type route struct{ dest, mask, gw string }
 
 func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) {
@@ -237,18 +224,4 @@ func clearSystemProxy() error {
 	}
 	defer k.Close()
 	return k.SetDWordValue("ProxyEnable", 0)
-}
-
-// openAppWindow shows the UI in an app-style Edge window (always present on Windows 10/11).
-func openAppWindow(url string) {
-	for _, c := range [][]string{
-		{"msedge", "--app=" + url, "--window-size=520,760"},
-		{"cmd", "/c", "start", "", url},
-	} {
-		cmd := exec.Command(c[0], c[1:]...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		if cmd.Start() == nil {
-			return
-		}
-	}
 }

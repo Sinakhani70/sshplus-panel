@@ -48,7 +48,7 @@ One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear +
 
 ### CK Client (Windows desktop client)
 
-SSH + UDPGW VPN client for Windows x64 that works with this panel's servers.
+Native Windows x64 desktop app (not web-based) with the panel's colours and logo; SSH + UDPGW VPN client for this panel's servers.
 
 **[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [details](ck-client/README.md)
 
@@ -279,7 +279,7 @@ Use this software only on servers you own or administer, and in accordance with 
 
 ### CK Client (کلاینت ویندوز)
 
-کلاینت VPN با SSH و UDPGW برای ویندوز ۶۴ بیت که با سرورهای همین پنل کار می‌کند.
+برنامه‌ی دسکتاپ بومی ویندوز ۶۴ بیت (نه تحت وب) با رنگ‌بندی و لوگوی پنل؛ کلاینت VPN با SSH و UDPGW برای سرورهای همین پنل.
 
 **[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [توضیحات بیشتر](ck-client/README.md)
 
