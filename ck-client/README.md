@@ -8,6 +8,11 @@ Native Windows x64 desktop app (no browser, no web UI) for the SSH Plus panel: *
 - Auto-reconnect with keep-alive; VPN routes stay in place while reconnecting (no leak to the open internet).
 - Server host key pinned on first connect (trust-on-first-use); a changed key is refused.
 
+## Install
+Run `CK-Client-Setup.exe`: choose the language, **pick any install folder** (default `C:\Program Files\CK Client`), optionally add a desktop shortcut. Uninstall from Windows Settings → Apps (it never deletes anything but its own files).
+
+Portable use also works: just run `ck-client.exe`.
+
 ## Use
 1. VPN mode needs `wintun.dll`: the app downloads the official build (SHA-256 checked) on first connect; if that fails, get the amd64 DLL from <https://www.wintun.net> and put it next to `ck-client.exe`.
 2. Run `ck-client.exe` (Windows asks for Administrator – needed to create the adapter and routes).

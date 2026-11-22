@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 ck-client/dist/*
 !ck-client/dist/ck-client.exe
+!ck-client/dist/CK-Client-Setup.exe

@@ -50,7 +50,7 @@ One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear +
 
 Native Windows x64 desktop app (not web-based) with the panel's colours and logo; SSH + UDPGW VPN client for this panel's servers.
 
-**[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [details](ck-client/README.md)
+**[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · **[⬇ Installer (choose install folder)](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [details](ck-client/README.md)
 
 - **VPN mode** (all apps, via a Wintun adapter) or **SOCKS5 proxy mode**; UDP (games, calls, DNS) goes through UDPGW (`127.0.0.1:7300`).
 - SSH over TCP or TLS/SNI, password or key login, auto-reconnect, host-key pinning.
@@ -281,7 +281,7 @@ Use this software only on servers you own or administer, and in accordance with 
 
 برنامه‌ی دسکتاپ بومی ویندوز ۶۴ بیت (نه تحت وب) با رنگ‌بندی و لوگوی پنل؛ کلاینت VPN با SSH و UDPGW برای سرورهای همین پنل.
 
-**[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [توضیحات بیشتر](ck-client/README.md)
+**[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · **[⬇ نصب‌کننده (انتخاب مسیر نصب)](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/CK-Client-Setup.exe)** · [توضیحات بیشتر](ck-client/README.md)
 
 - **حالت VPN** (همه برنامه‌ها، با کارت شبکه Wintun) یا **حالت پراکسی SOCKS5**؛ ترافیک UDP (بازی، تماس، DNS) از UDPGW (`127.0.0.1:7300`) رد می‌شود.
 - SSH روی TCP یا TLS با SNI، ورود با رمز یا کلید، اتصال مجدد خودکار و ذخیره اثر انگشت کلید سرور.
