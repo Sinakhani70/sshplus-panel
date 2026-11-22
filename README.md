@@ -2,6 +2,10 @@
 
 One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear + BadVPN UDPGW + BBR**, a **two-server tunnel**, and a web panel (**CK.VPN**) for managing accounts.
 
+Source and releases: **<https://github.com/Sinakhani70/sshplus-panel>**
+
+**Windows client:** this panel has its own Windows app, **CK Client** (in [`ck-client/`](ck-client/README.md)). Create an account in the panel, then enter that account's server address, SSH port, username and password in CK Client; keep **UDPGW** enabled on `127.0.0.1:7300` (the panel's default) so games, calls and DNS work. CK Client is meant to be used with the servers and accounts of this panel.
+
 **Language: [English](#english) | [فارسی](#فارسی)**
 
 ---
@@ -241,6 +245,12 @@ Use this software only on servers you own or administer, and in accordance with 
 <a name="فارسی"></a>
 
 ## فارسی
+
+### آدرس پروژه و کلاینت ویندوز
+
+آدرس پروژه: **<https://github.com/Sinakhani70/sshplus-panel>**
+
+برای اتصال از ویندوز، از برنامه‌ی **CK Client** که مخصوص همین پنل ساخته شده استفاده کن (پوشه‌ی [`ck-client/`](ck-client/README.md)، لینک دانلود در همین صفحه و در صفحه‌ی اصلی پنل). مراحل: ۱) در پنل یک اکانت بساز. ۲) در CK Client آدرس سرور، پورت SSH، نام کاربری و رمز همان اکانت را وارد کن. ۳) **UDPGW** را روشن بگذار و آدرسش را `127.0.0.1:7300` (پیش‌فرض پنل) بگذار تا بازی، تماس و DNS هم کار کنند. CK Client برای استفاده با سرورها و اکانت‌های همین پنل طراحی شده است.
 
 ### امکانات
 
