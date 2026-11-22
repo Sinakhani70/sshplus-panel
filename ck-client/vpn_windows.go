@@ -3,10 +3,16 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,15 +55,67 @@ func isAdmin() bool {
 	return err == nil && m
 }
 
+const (
+	wintunURL  = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+	wintunSHA  = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+	wintunHelp = "download wintun.dll (amd64) from https://www.wintun.net and put it next to ck-client.exe"
+)
+
+// ensureWintun makes sure wintun.dll sits next to the exe, downloading the
+// official build (checked against a pinned SHA-256) when it is missing.
+func ensureWintun(logf func(string, ...any)) error {
+	exe, _ := os.Executable()
+	dst := filepath.Join(filepath.Dir(exe), "wintun.dll")
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+	logf("wintun.dll not found - downloading the official build...")
+	cl := &http.Client{Timeout: 60 * time.Second}
+	resp, err := cl.Get(wintunURL)
+	if err != nil {
+		return fmt.Errorf("wintun.dll missing and download failed (%v); %s", err, wintunHelp)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil || resp.StatusCode != 200 {
+		return fmt.Errorf("wintun.dll missing and download failed (HTTP %d); %s", resp.StatusCode, wintunHelp)
+	}
+	if sum := sha256.Sum256(body); hex.EncodeToString(sum[:]) != wintunSHA {
+		return fmt.Errorf("downloaded wintun archive failed its checksum, refusing to use it; %s", wintunHelp)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return err
+	}
+	for _, f := range zr.File {
+		if f.Name == "wintun/bin/amd64/wintun.dll" {
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			dll, err := io.ReadAll(rc)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(dst, dll, 0o644); err != nil {
+				return fmt.Errorf("cannot save wintun.dll: %v; %s", err, wintunHelp)
+			}
+			logf("wintun.dll installed")
+			return nil
+		}
+	}
+	return errors.New("wintun archive has an unexpected layout; " + wintunHelp)
+}
+
 type route struct{ dest, mask, gw string }
 
 func startVPN(t *Tunnel, p *Profile, logf func(string, ...any)) (func(), error) {
 	if !isAdmin() {
 		return nil, errors.New("VPN mode needs Administrator rights")
 	}
-	exe, _ := os.Executable()
-	if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "wintun.dll")); err != nil {
-		return nil, errors.New("wintun.dll not found next to ck-client.exe - download the amd64 build from https://www.wintun.net and copy it here")
+	if err := ensureWintun(logf); err != nil {
+		return nil, err
 	}
 
 	// 1. where does the server live, and which gateway do we use to reach it?

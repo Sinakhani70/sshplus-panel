@@ -9,7 +9,7 @@ Native Windows x64 desktop app (no browser, no web UI) for the SSH Plus panel: *
 - Server host key pinned on first connect (trust-on-first-use); a changed key is refused.
 
 ## Use
-1. Download `wintun.dll` (amd64) from <https://www.wintun.net> and put it next to `ck-client.exe` (VPN mode only).
+1. VPN mode needs `wintun.dll`: the app downloads the official build (SHA-256 checked) on first connect; if that fails, get the amd64 DLL from <https://www.wintun.net> and put it next to `ck-client.exe`.
 2. Run `ck-client.exe` (Windows asks for Administrator – needed to create the adapter and routes).
 3. Add a profile: server, SSH port, user/password, keep **UDPGW** on with `127.0.0.1:7300` (the panel default), press Connect.
 
