@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.7.2 — CK Client (Windows app) on the panel's main page
+- **New card on the panel's main page** (above the tabs, visible on every tab, English/Persian): links to download the **CK Client** Windows app (installer with a selectable install folder, or the portable exe) and a short note that it is the way to connect to this server from Windows with SSH + UDPGW (`127.0.0.1:7300`). The app itself lives in `ck-client/` (Go, native Windows UI, Wintun VPN mode or SOCKS5 mode, ping display).
+
 ## v1.7.1 — WireGuard tunnel type, HTTPS-through-tunnel fix, exit-server update
 ### Added
 - **"Update exit server" button** (Tunnel tab): rewrites the exit server's script and rules with the panel's current version without removing the tunnel (the exit side was only written at setup, so exit-side fixes needed a re-install). Keeps the current routing mode.

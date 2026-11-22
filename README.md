@@ -123,6 +123,7 @@ Users connect to this server (server 1). The exit server (server 2) is only used
 **Limits** — the tunnel is IPv4-only and runs over TCP/SSH (keep BBR on for both servers); one exit server at a time; users entering through server 2 are seen by server 1 with the exit server's address.
 
 ### Panel features
+- **CK Client card on the main page**: download links for the Windows app (installer / portable) with a note to use it to connect to the server over SSH + UDPGW.
 
 **Subscription page and QR** — every account has a secret link `https://HOST:2053/s/<token>` (button 🔗 in the account list): a login-free page with expiry, usage, connection info (follows In/Out and port mapping), an `ssh://` link and a QR code. Wrong tokens are rate-limited per IP. The same link also works for **apps**: browsers get the page, apps get the standard subscription list (base64 of `ssh://` links, with usage/expiry headers); force a format with `?fmt=plain|b64|html` (`?auth=b64` for the base64-login variant). If an app rejects the self-signed certificate, install a real certificate or enable the optional plain-HTTP subscription URL in Settings → HTTPS (the password is inside the link, so use it only if needed).
 
@@ -354,6 +355,7 @@ Panel URL: https://YOUR_SERVER_IP:2053  (first login: admin / admin, you must ch
 **محدودیت‌ها** — تانل فقط IPv4 است و روی TCP/SSH اجرا می‌شود (BBR را روی هر دو سرور روشن نگه دار)؛ فعلاً یک سرور خروجی؛ کاربری که از سرور ۲ وارد می‌شود، روی سرور ۱ با آدرس سرور خروجی دیده می‌شود.
 
 ### امکانات پنل
+- **کارت CK Client در صفحه‌ی اصلی**: لینک دانلود برنامه‌ی ویندوز (نصب‌کننده / قابل‌حمل) به‌همراه توضیح استفاده از آن برای اتصال به سرور با SSH و UDPGW.
 
 **صفحه‌ی اشتراک و QR** — هر اکانت یک لینک مخصوص `https://HOST:2053/s/<token>` دارد (دکمه‌ی 🔗 در لیست): صفحه‌ای بدون نیاز به ورود با انقضا، مصرف، اطلاعات اتصال (مطابق In/Out و نگاشت پورت)، لینک `ssh://` و QR. توکن غلط برای هر IP محدودیت تعداد دارد. همین لینک برای **برنامه‌ها** هم کار می‌کند: مرورگر صفحه را می‌گیرد و برنامه فهرست استاندارد اشتراک را (base64 از لینک‌های `ssh://` همراه سربرگ مصرف/انقضا)؛ با `?fmt=plain|b64|html` قالب را اجباری کن (`?auth=b64` برای حالت base64 در بخش ورود). اگر برنامه گواهی self-signed را رد کرد، گواهی معتبر نصب کن یا گزینه‌ی اختیاری «لینک اشتراک روی HTTP ساده» را در تنظیمات ← HTTPS روشن کن (رمز داخل لینک است؛ فقط در صورت نیاز).
 
