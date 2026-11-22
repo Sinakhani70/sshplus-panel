@@ -434,6 +434,53 @@ class SecurityHardening(unittest.TestCase):
         app.TOK.clear(); app.FAIL.clear()
 
 
+class NetMonitor(unittest.TestCase):
+    PING = """PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
+64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=50.0 ms
+64 bytes from 1.1.1.1: icmp_seq=2 ttl=57 time=60.0 ms
+64 bytes from 1.1.1.1: icmp_seq=4 ttl=57 time=55.0 ms
+
+--- 1.1.1.1 ping statistics ---
+4 packets transmitted, 3 received, 25% packet loss, time 601ms
+"""
+    def test_sample_math(self):
+        t, avg, jit, loss, mx = app.nm_sample(self.PING)
+        self.assertEqual((avg, loss, mx), (55.0, 25.0, 60.0))
+        self.assertEqual(jit, 7.5)                                   # mean(|60-50|, |55-60|) = 7.5: consecutive replies, not the standard deviation
+        self.assertEqual(app.nm_sample("ping: connect: Network is unreachable")[1:], [-1, 0, 100.0, -1])
+        self.assertEqual(app.nm_sample("4 packets transmitted, 0 received, 100% packet loss")[3], 100.0)
+
+    def test_targets_are_validated(self):
+        for ok in ("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "example.com", " Example.COM "): self.assertTrue(app.nm_target(ok), ok)
+        for bad in ("-c1", "--help", "a;b.com", "x y.com", "localhost", "1.1.1.1\n-f", "", "a" * 120 + ".com"): self.assertEqual(app.nm_target(bad), "", bad)
+        with tempfile.TemporaryDirectory() as d:
+            old = app.NETMON_CF; app.NETMON_CF = os.path.join(d, "nm.json")
+            try:
+                self.assertEqual(app.netmon_save({"on": True, "targets": "1.1.1.1, 8.8.8.8"})[0], 200)
+                self.assertEqual(app.netmon_cfg(), {"on": True, "targets": ["1.1.1.1", "8.8.8.8"]})
+                self.assertEqual(app.netmon_save({"targets": ["1.1.1.1", "9.9.9.9", "8.8.4.4", "4.4.4.4"]})[0], 400)
+                self.assertEqual(app.netmon_save({"targets": ["-c1"]})[0], 400)
+                self.assertEqual(app.netmon_cfg()["targets"], ["1.1.1.1", "8.8.8.8"])      # a refused save changes nothing
+            finally: app.NETMON_CF = old
+
+    def test_session_stats_parser(self):
+        out = ("0      0      10.0.0.1:442      203.0.113.7:50111\n\t cubic rtt:180.5/60 cwnd:10 retrans:0/3 unacked:2\n"
+               "0      0      10.0.0.1:442      198.51.100.9:40000\n\t cubic rtt:35/4 cwnd:10\n"
+               "0      0      127.0.0.1:40100      127.0.0.1:60000\n\t cubic rtt:0.1/0.05\n"
+               "0      0      10.0.0.1:9999      203.0.113.8:1\n\t cubic rtt:500/1\n")
+        keep = {n: getattr(app, n) for n in ("cmd", "sshd_ports", "rjson", "tls_cfg", "IPS")}
+        try:
+            app.cmd = lambda c, *a, **k: (0, out, ""); app.sshd_ports = lambda: {22}
+            app.rjson = lambda p, d=None: {"db": [442]} if p == app.PORTS else (d if d is not None else {})
+            app.tls_cfg = lambda: {"on": False, "ports": [], "tports": []}; app.IPS = {"alice": ["203.0.113.7"]}
+            r = app.net_sessions()
+        finally:
+            for n, v in keep.items(): setattr(app, n, v)
+        self.assertEqual(r["n"], 2)                                   # port 9999 is not ours, 127.0.0.1 (TLS back end) is skipped
+        self.assertEqual([x["peer"] for x in r["rows"]], ["203.0.113.7", "198.51.100.9"])   # worst RTT first
+        self.assertEqual((r["rows"][0]["user"], r["rows"][0]["retrans"], r["with_retrans"], r["median"]), ("alice", 3, 1, 180.5))
+
+
 class GameAccounts(unittest.TestCase):
     def test_shell_matrix_has_a_direct_only_game_shell(self):
         g = app.shell_for("direct", "game")

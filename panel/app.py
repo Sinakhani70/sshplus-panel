@@ -327,6 +327,101 @@ def game_sshd_apply(d):
   SSHP["t"]=0
   return 200,dict(game_state(),ok=1,reloaded=True)
 
+
+# ---------- Network monitor: ping / jitter / loss from this server to chosen targets, plus per-session TCP stats ----------
+NETMON_CF="/etc/SSHPlus/netmon.json"; NETMON_HIST="/etc/SSHPlus/netmon_hist.json"; NM_KEEP=720            # 12 h at one sample per minute and target
+NM={"s":{},"n":0}; NML=threading.Lock()
+NM_DEFAULT=["1.1.1.1","8.8.8.8"]
+
+def nm_target(x):
+  # an IP literal or a plain host name; never anything that could look like an option
+  x=str(x).strip().lower()
+  try: return str(ipaddress.ip_address(x))
+  except ValueError: pass
+  return x if HOST_RE.match(x) and "." in x and len(x)<=100 else ""
+
+def netmon_cfg():
+  d=rjson(NETMON_CF,{}); tg=[]
+  for x in d.get("targets",NM_DEFAULT):
+    t=nm_target(x)
+    if t and t not in tg: tg.append(t)
+  return {"on":bool(d.get("on")),"targets":tg[:3] or list(NM_DEFAULT)}
+
+def netmon_save(d):
+  raw=d.get("targets",[])
+  if isinstance(raw,str): raw=re.split(r"[\s,;]+",raw)
+  if not isinstance(raw,list): return 400,{"ok":0,"msg":"Invalid targets"}
+  tg=[]
+  for x in raw:
+    if str(x).strip()=="": continue
+    t=nm_target(x)
+    if not t: return 400,{"ok":0,"msg":"Invalid target: "+str(x)[:60]}
+    if t not in tg: tg.append(t)
+  if len(tg)>3: return 400,{"ok":0,"msg":"At most 3 targets"}
+  wjson(NETMON_CF,{"on":bool(d.get("on")),"targets":tg or list(NM_DEFAULT)})
+  return 200,{"ok":1,**netmon_state()}
+
+def nm_sample(o):
+  # sample = [timestamp, mean rtt ms, jitter ms, loss %, max rtt ms]; jitter = mean absolute difference of consecutive replies
+  ts=[float(v) for v in re.findall(r"time[=<]([0-9.]+) ?ms",o)]
+  m=re.search(r"(\d+) packets transmitted, (\d+) (?:packets )?received",o)
+  sent,rcv=(int(m.group(1)),int(m.group(2))) if m else (0,0)
+  loss=round(100.0*(sent-rcv)/sent,1) if sent else 100.0
+  if not ts: return [int(time.time()),-1,0,loss,-1]
+  jit=sum(abs(b-a) for a,b in zip(ts,ts[1:]))/(len(ts)-1) if len(ts)>1 else 0.0
+  return [int(time.time()),round(sum(ts)/len(ts),1),round(jit,1),loss,round(max(ts),1)]
+
+def nm_round():
+  cfg=netmon_cfg()
+  for t in cfg["targets"]:
+    _,o,_=cmd(["ping","-n"]+(["-6"] if ":" in t else [])+["-c","10","-i","0.2","-W","1",t],25)
+    smp=nm_sample(o)
+    with NML:
+      sr=NM["s"].setdefault(t,[]); sr.append(smp); del sr[:-NM_KEEP]
+  with NML:
+    NM["n"]+=1
+    if NM["n"]%5==0: wjson(NETMON_HIST,{k:v for k,v in NM["s"].items() if k in cfg["targets"]})
+
+def netmon_loop():
+  with NML: NM["s"]=rjson(NETMON_HIST,{})
+  while True:
+    t0=time.time()
+    try:
+      if netmon_cfg()["on"]: nm_round()
+    except Exception: pass
+    time.sleep(max(5,60-(time.time()-t0)))
+
+def netmon_state():
+  cfg=netmon_cfg()
+  with NML: ser={t:list(NM["s"].get(t,[])) for t in cfg["targets"]}
+  return {"on":cfg["on"],"targets":cfg["targets"],"series":ser,"last":{t:(v[-1] if v else None) for t,v in ser.items()}}
+
+def net_sessions():
+  # per-connection TCP stats of the clients on the SSH/Dropbear/TLS ports, taken from this server's own TCP stack (ss -ti):
+  # the RTT here includes the client's mobile network, so it separates "the server" from "the path to the client"
+  pc=rjson(PORTS,{}); tl=tls_cfg()
+  ports=set(sshd_ports())|{to_port(x) for x in pc.get("db",[])}|{to_port(x) for x in pc.get("tdb",[])}|set(game_ports())|((set(tl["ports"])|set(tl["tports"])) if tl["on"] else set())
+  ports.discard(None)
+  rc,o,_=cmd(["ss","-tinH","state","established"],10)
+  byip={}
+  for u,ips in IPS.items():
+    for ip in ips: byip.setdefault(ip,[]).append(u)
+  rows=[]; head=None
+  for l in (o.splitlines() if rc==0 else []):
+    if l[:1] not in (" ","\t"):
+      f=l.split(); head=None
+      if len(f)>=4 and ":" in f[-1] and ":" in f[-2]:
+        lp=f[-2].rsplit(":",1)[1]; pe=f[-1].rsplit(":",1)[0].strip("[]")
+        if lp.isdigit() and int(lp) in ports and pe not in ("127.0.0.1","::1"): head=(int(lp),pe)
+      continue
+    if head is None: continue
+    r=re.search(r"\brtt:([0-9.]+)/([0-9.]+)",l); rt=re.search(r"\bretrans:(\d+)/(\d+)",l)
+    if r: rows.append({"port":head[0],"peer":head[1],"user":",".join(byip.get(head[1],[])[:2]),"rtt":float(r.group(1)),"var":float(r.group(2)),"retrans":int(rt.group(2)) if rt else 0})
+    head=None
+  rows.sort(key=lambda x:-x["rtt"])
+  rt=sorted(x["rtt"] for x in rows)
+  return {"n":len(rows),"median":rt[len(rt)//2] if rt else None,"with_retrans":sum(1 for x in rows if x["retrans"]>0),"rows":rows[:60]}
+
 # ---------- stats & users ----------
 def stats():
   try:
@@ -350,6 +445,7 @@ def stats():
           "db":cmd(["systemctl","is-active","sshplus-dropbear"])[0]==0,
           "dbt":cmd(["systemctl","is-active","sshplus-dropbear-t"])[0]==0,
           "dbg":cmd(["systemctl","is-active","sshplus-dropbear-g"])[0]==0 if game_ports() else None,
+          "ssh":cmd(["systemctl","is-active","ssh"])[0]==0 or cmd(["systemctl","is-active","sshd"])[0]==0,
           "on_tot":sum(len(v) for v in om.values()),"om":{k:len(v) for k,v in om.items()}}
 
 def get_users(om):
@@ -2156,6 +2252,8 @@ class H(BaseHTTPRequestHandler):
         s.js({"ssh":ssh_uris(x),"sshb":ssh_uris(x,True),"plain_sub":bool(rjson(CFG,{}).get("plain_sub")),"tlsinfo":tls_manual_text(x)}); return
       if p=="/api/allow": s.js({"list":rjson(CFG,{}).get("allow") or [],"me":s.client_address[0]}); return
       if p=="/api/game": s.js(game_state()); return
+      if p=="/api/netmon": s.js(netmon_state()); return
+      if p=="/api/netmon/sessions": s.js(net_sessions()); return
       if p=="/api/history": s.js(hist_get()); return
       if p=="/api/telegram": s.js(tg_state()); return
       if p=="/api/templates": s.js(tpl_list()); return
@@ -2221,6 +2319,7 @@ class H(BaseHTTPRequestHandler):
       elif p=="/api/user/del": c,r=user_del(d); s.js(r,c)
       elif p=="/api/ports": c,r=apply_ports(d); s.js(r,c)
       elif p=="/api/badvpn": c,r=save_bv(d); s.js(r,c)
+      elif p=="/api/netmon/save": c,r=netmon_save(d); s.js(r,c)
       elif p=="/api/game": c,r=game_apply(bool(d.get("on"))); s.js(r,c)
       elif p=="/api/game/sshd": c,r=game_sshd_apply(d); s.js(r,c)
       elif p=="/api/bbr" and rjson(GAMEF,{}).get("on"): s.js({"ok":0,"msg":"Game Profile controls BBR and the queue discipline; turn it off first"},400)
@@ -2269,6 +2368,7 @@ if __name__=="__main__":
   try: migrate_secrets()
   except Exception: pass
   threading.Thread(target=mon,daemon=True).start()
+  threading.Thread(target=netmon_loop,daemon=True).start()
   threading.Thread(target=tg_poll,daemon=True).start()
   c=rjson(CFG,{})
   srv=Srv((str(c.get("bind","0.0.0.0")),int(c.get("port",2053))),H); SRV[0]=srv  # nosec B104 - the panel is meant to be reachable
