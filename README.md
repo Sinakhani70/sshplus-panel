@@ -46,6 +46,18 @@ One-command installer for an SSH tunnel server on Ubuntu: **OpenSSH + Dropbear +
 - Telegram bot: alerts and daily backup.
 - Safe to re-run: existing users, ports, tunnel and settings are kept.
 
+### CK Client (Windows desktop client)
+
+SSH + UDPGW VPN client for Windows x64 that works with this panel's servers.
+
+**[⬇ Download ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [details](ck-client/README.md)
+
+- **VPN mode** (all apps, via a Wintun adapter) or **SOCKS5 proxy mode**; UDP (games, calls, DNS) goes through UDPGW (`127.0.0.1:7300`).
+- SSH over TCP or TLS/SNI, password or key login, auto-reconnect, host-key pinning.
+- Needs `wintun.dll` (amd64, from <https://www.wintun.net>) next to the exe for VPN mode, and Administrator rights.
+- The Windows-specific parts (adapter, routes) have not been tested on real Windows yet; unsigned binary, so SmartScreen/antivirus may warn.
+- Build yourself: `cd ck-client && ./build.sh`
+
 ### Requirements
 - Ubuntu 22.04 or 24.04 (fresh server recommended), root access.
 - Internet access (packages and BadVPN are downloaded/compiled during install).
@@ -264,6 +276,18 @@ Use this software only on servers you own or administer, and in accordance with 
 - بکاپ و بازیابی رمزنگاری‌شده.
 - ربات تلگرام: هشدار و بکاپ روزانه.
 - اجرای دوباره‌ی اسکریپت امن است: کاربران، پورت‌ها، تانل و تنظیمات حفظ می‌شوند.
+
+### CK Client (کلاینت ویندوز)
+
+کلاینت VPN با SSH و UDPGW برای ویندوز ۶۴ بیت که با سرورهای همین پنل کار می‌کند.
+
+**[⬇ دانلود ck-client.exe](https://github.com/Sinakhani70/sshplus-panel/raw/claude/fervent-einstein-ffsqxa/ck-client/dist/ck-client.exe)** · [توضیحات بیشتر](ck-client/README.md)
+
+- **حالت VPN** (همه برنامه‌ها، با کارت شبکه Wintun) یا **حالت پراکسی SOCKS5**؛ ترافیک UDP (بازی، تماس، DNS) از UDPGW (`127.0.0.1:7300`) رد می‌شود.
+- SSH روی TCP یا TLS با SNI، ورود با رمز یا کلید، اتصال مجدد خودکار و ذخیره اثر انگشت کلید سرور.
+- برای حالت VPN فایل `wintun.dll` (نسخه amd64 از <https://www.wintun.net>) باید کنار exe باشد و برنامه با دسترسی Administrator اجرا شود.
+- بخش‌های مخصوص ویندوز (کارت شبکه و مسیرها) هنوز روی ویندوز واقعی تست نشده‌اند؛ فایل امضای دیجیتال ندارد و ممکن است SmartScreen یا آنتی‌ویروس هشدار بدهد.
+- ساخت از سورس: `cd ck-client && ./build.sh`
 
 ### پیش‌نیازها
 - اوبونتو ۲۲.۰۴ یا ۲۴.۰۴ (ترجیحاً سرور تازه) و دسترسی root.
