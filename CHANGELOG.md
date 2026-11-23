@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.3 — Login page: no more silent failures
+### Fixed
+- **The login page could stay on screen doing nothing, with no message.** Three failures were swallowed silently (reproduced in a real browser): the browser refusing `localStorage` (private mode, site data blocked for that address, some in-app browsers) broke the script at start-up and again right after a successful login; a cut connection or reset on the login request; and a non-JSON answer (an HTML page from a proxy, firewall, Cloudflare or an ISP). Each address (the IP and a domain name) is a separate browser origin with its own storage, so a problem could show up with one and not the other. The token is now kept in memory when storage is blocked (the session works, it just is not remembered), and every failure shows what happened: cannot reach the panel (network / filtering / DNS), HTTP status and "a proxy or firewall is probably in the way", or "your address is not in the allowed list". The server side was checked with a domain name (SNI + Host header): login works exactly as with the IP.
+
 ## v1.8.2 — Certificate flow fixes
 ### Fixed
 - **Renewing or re-issuing the certificate from the panel restarted the panel in the middle of the job.** certbot's deploy hook called `systemctl restart sshplus-panel`, so the running renew job died with it: the page lost its connection, the session token was gone (signed out), the job state vanished and success was never shown, although the certificate had been renewed. The hook now only asks the running panel to reload its certificate (flag file `/etc/SSHPlus/cert.reload`, picked up within 3 s, the HTTPS context is swapped in place); nothing is restarted. Checked in the lab with a certbot stand-in that runs the deploy hook like the real one: the job finishes with all 3 steps, the token stays valid and the new certificate is served.

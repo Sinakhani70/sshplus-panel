@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.8.2  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.8.3  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.8.2"
+VERSION="1.8.3"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -3707,7 +3707,10 @@ function setLang(l,init){
 function toggleLang(){setLang(LANG==="en"?"fa":"en")}
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let tnCfg={};
-let stLast={}, tok=localStorage.getItem("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="", tlsB={}, tlsS={};
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}      // storage can be blocked (private mode, site data off, in-app browsers): the panel must still work for the session
+function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+function lsDel(k){try{localStorage.removeItem(k)}catch(e){}}
+let stLast={}, tok=lsGet("tok")||"", ul=[], pCfg={ssh:22,ssh2:0,db:[]}, bv={}, bbrOn=false, lastSig="", tlsB={}, tlsS={};
 function swTab(t){
   const T={u:"secU",t:"secT",l:"secL",h:"secH",s:"secS"}, B={u:"bTabU",t:"bTabT",l:"bTabL",h:"bTabH",s:"bTabS"};
   Object.keys(T).forEach(k=>{$(T[k]).classList.toggle("hid",k!==t); $(B[k]).classList.toggle("act",k===t)});
@@ -3773,7 +3776,8 @@ async function api(u,m="GET",b=null){
   const o={method:m,headers:{"Authorization":"Bearer "+tok}};
   if(b){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(b)}
   const r=await fetch(u,o);
-  if(r.status===401){localStorage.removeItem("tok");$("lBox").classList.remove("hid");throw new Error("401")}
+  if(r.status===401){lsDel("tok");$("lBox").classList.remove("hid");throw new Error("401")}
+  if(r.status===403){const e=await r.clone().json().catch(()=>({})); if(e.err===3){alert(L("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list."));throw new Error("403")}}
   const j=await r.json().catch(()=>({}));
   if(r.status===403&&j.err==="must_change"){showFp();throw new Error("must_change")}
   return j;
@@ -3785,13 +3789,16 @@ async function saveFp(){
   if(a!==b){alert("تکرار رمز یکسان نیست");return}
   const r=await fetch("/api/admin",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:JSON.stringify({p:a})});
   const j=await r.json();
-  if(j.ok){tok=j.tok;localStorage.setItem("tok",tok);$("fpBox").classList.add("hid");$("fp1").value="";$("fp2").value="";$("lp").value="";load(1);loadTpl().catch(()=>{})}else alert(j.msg||"Error");
+  if(j.ok){tok=j.tok;lsSet("tok",tok);$("fpBox").classList.add("hid");$("fp1").value="";$("fp2").value="";$("lp").value="";load(1);loadTpl().catch(()=>{})}else alert(j.msg||"Error");
 }
 async function login(){
-  const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})});
+  let r,j;
+  try{r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})})}
+  catch(e){alert(L("اتصال به پنل برقرار نشد (شبکه، فیلترینگ یا DNS). اگر فقط با دامنه این‌طور است، با آدرس IP امتحان کن.","Could not reach the panel (network, filtering or DNS). If this only happens with the domain name, try the IP address."));return}
   if(r.status===429){alert("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید");return}
-  const j=await r.json();
-  if(j.tok){tok=j.tok;localStorage.setItem("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else alert("نام کاربری یا رمز عبور اشتباه است");
+  if(r.status===403){alert(L("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list."));return}
+  try{j=await r.json()}catch(e){alert(L("پاسخ نامعتبر از سرور (HTTP "+r.status+"): احتمالاً یک پروکسی، فایروال یا Cloudflare بین تو و پنل است.","Invalid answer from the server (HTTP "+r.status+"): a proxy, firewall or Cloudflare is probably between you and the panel."));return}
+  if(j.tok){tok=j.tok;lsSet("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else alert("نام کاربری یا رمز عبور اشتباه است");
 }
 function portOpts(sp,db,tl){
   let o='<option value="All">همه پورت‌ها</option>';
@@ -3880,7 +3887,7 @@ async function saveAdm(){
   const u=$("au").value.trim(), p=$("ap").value.trim();
   if(!u&&!p){alert("نام کاربری یا رمز جدید را وارد کنید");return}
   const r=await api("/api/admin","POST",{u,p});
-  if(r.ok){tok=r.tok;localStorage.setItem("tok",tok);$("au").value=r.u;$("ap").value="";$("lu").value=r.u;$("lp").value=r.p;alert("مشخصات ورود تغییر کرد")}
+  if(r.ok){tok=r.tok;lsSet("tok",tok);$("au").value=r.u;$("ap").value="";$("lu").value=r.u;$("lp").value=r.p;alert("مشخصات ورود تغییر کرد")}
   else alert(r.msg||"Error");
 }
 function copyU(u){
@@ -4073,7 +4080,7 @@ function doRestore(){
   rd.onload=async()=>{
     const b64=String(rd.result).split(",")[1]||"";
     const r=await api("/api/restore","POST",{data:b64,pass:pw});
-    if(r.ok){alert("بازیابی انجام شد ("+r.users+" کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.");setTimeout(()=>{localStorage.removeItem("tok");location.reload()},5000)}else alert(r.msg||"Error");
+    if(r.ok){alert("بازیابی انجام شد ("+r.users+" کاربر). پنل چند ثانیه دیگر ری‌استارت می‌شود؛ دوباره وارد شو.");setTimeout(()=>{lsDel("tok");location.reload()},5000)}else alert(r.msg||"Error");
   };
   rd.readAsDataURL(f);
 }
