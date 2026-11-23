@@ -20,7 +20,7 @@ if [ ! -f "$ANDROID_JAR" ]; then
   curl -fL -o "$ANDROID_JAR" "https://repo.maven.apache.org/maven2/org/robolectric/android-all/$ALL_VER/android-all-$ALL_VER.jar"
 fi
 
-VERSION_CODE="${VERSION_CODE:-1}"; VERSION_NAME="${VERSION_NAME:-1.0}"
+VERSION_CODE="${VERSION_CODE:-2}"; VERSION_NAME="${VERSION_NAME:-1.0.1}"
 B="$ROOT/build"; rm -rf "$B"; mkdir -p "$B/gen" "$B/classes" "$B/lib/arm64-v8a" "$B/lib/armeabi-v7a" "$B/lib/x86_64"
 
 echo "== engine (Go)"
