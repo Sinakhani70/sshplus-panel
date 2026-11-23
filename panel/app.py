@@ -1270,6 +1270,7 @@ def mon():
         prune_auth(); stunnel_log_trim()
         try: alerts_tick(hist_tick())
         except Exception: pass
+      cert_reload_check()                                                  # a certificate renewed by certbot's hook is loaded without restarting the panel
       if n%10==1 and os.path.exists(TNET): cmd([TNET,"sync"])     # keep uid rules in line with the accounts
       sessions,io_pids=on_map(True)
       um=user_uid_map(); sh=shadow_map(); lim=read_limits_db(); today=int(time.time()//86400)
@@ -1404,7 +1405,7 @@ HOOK_PATH="/etc/letsencrypt/renewal-hooks/deploy/ckvpn.sh"
 TJ={"run":False,"steps":[],"ok":None,"domain":""}; TJL=threading.Lock(); TAL=threading.Lock()
 DOM_RE=re.compile(r"^(?=.{4,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\Z")
 DUCK_RE=re.compile(r"^[a-z0-9][a-z0-9-]{0,62}\Z"); DUCKTOK_RE=re.compile(r"^[0-9A-Fa-f-]{8,64}\Z")
-MAIL_RE=re.compile(r"^[^@\s\"']{1,64}@[^@\s\"']{1,200}\.[^@\s\"']{2,24}\Z")
+MAIL_RE=re.compile(r"^(?!-)[^@\s\"']{1,64}@[^@\s\"']{1,200}\.[^@\s\"']{2,24}\Z")
 WILD={"sslip":"sslip.io","nip":"nip.io"}          # wildcard-DNS services: <ip-with-dashes>.<suffix> resolves to that IP (no account needed)
 DUCK_URL=os.environ.get("SSHPLUS_DUCK_URL","https://www.duckdns.org/update")
 
@@ -1422,7 +1423,12 @@ def tls_cfg():
   return {"on":bool(d.get("on")),"ports":pl("ports",[443]),"tports":pl("tports",[8843]),"bd":to_port(d.get("bd")) or 40100,"bt":to_port(d.get("bt")) or 40120,
           "mode":md,"domain":str(d.get("domain","")),"prov":str(d.get("prov","")),"suffix":str(d.get("suffix","")),"duckname":str(d.get("duckname","")),
           "duck":bool(d.get("duck")),"email":str(d.get("email","")),"staging":bool(d.get("staging")),
-          "perip":pi}
+          "lineage":str(d.get("lineage","")),"perip":pi}
+
+def tls_lineage(c):
+  # certbot lineage (cert-name) of the certificate that is installed: recorded when it was issued, otherwise derived from the flag
+  rec=str(c.get("lineage","")); dom=str(c.get("domain",""))
+  return rec if rec and (rec==dom or rec==dom+"-staging") else (dom+("-staging" if c.get("staging") else "") if dom else "")
 
 def tls_back_ports(c):
   return set(range(c["bd"],c["bd"]+TLS_BACKENDS))|set(range(c["bt"],c["bt"]+TLS_BACKENDS))
@@ -1604,7 +1610,7 @@ def tls_selfsign():
   if SRV[0] is not None:
     try: SRV[0].ctx=tls_ctx()
     except Exception: pass
-  d0=rjson(TLSC,{}); d0.update({"mode":"self","domain":""}); wjson(TLSC,d0); tls_reload()
+  d0=rjson(TLSC,{}); d0.update({"mode":"self","domain":"","lineage":""}); wjson(TLSC,d0); tls_reload()
   return 200,{"ok":1}
 
 # ---- free domain + Let's Encrypt certificate in one click
@@ -1622,6 +1628,18 @@ def pub_ip():
 def dns_ips(host):
   try: return sorted({r[4][0] for r in socket.getaddrinfo(host,None,socket.AF_INET)})
   except Exception: return []
+
+def dns_ips6(host):
+  try: return sorted({r[4][0].lower() for r in socket.getaddrinfo(host,None,socket.AF_INET6)})
+  except Exception: return []
+
+def local_ips6():
+  rc,o,_=cmd(["ip","-6","-o","addr","show","scope","global"])
+  return {m.lower() for m in re.findall(r"inet6 ([0-9a-fA-F:]+)/",o)} if rc==0 else set()
+
+def aaaa_mismatch(v6,local):
+  # Let's Encrypt prefers IPv6: an AAAA record that is not this server makes the HTTP challenge fail
+  return bool(v6) and not (set(v6)&set(local))
 
 def wait_dns(host,ip,secs):
   end=time.time()+secs
@@ -1702,6 +1720,12 @@ def _tls_issue(p):
     else: tj_end(False,"%s resolves to %s but this server is %s. Add an A record pointing to %s (if you use Cloudflare, set it to \"DNS only\") and try again."%(dom,res,ip,ip))
     return False
   tj_end(True if pub else "warn",", ".join(got) or "not checked")
+  v6=dns_ips6(dom)
+  if v6:
+    tj_begin("Checking the IPv6 (AAAA) record of %s"%dom)
+    if aaaa_mismatch(v6,local_ips6()):
+      tj_end(False,"%s has an AAAA (IPv6) record %s that does not belong to this server. Let's Encrypt tries IPv6 first and would fail: remove the AAAA record (or point it to this server) and try again."%(dom,", ".join(v6))); return False
+    tj_end(True,", ".join(v6))
   if not have("certbot"):
     tj_begin("Installing certbot (apt)")
     env=dict(ENV,DEBIAN_FRONTEND="noninteractive")
@@ -1728,14 +1752,14 @@ def _tls_issue(p):
   except Exception as e: tj_end(False,"certificate files not found: "+str(e)[:120]); return False
   code,r=cert_save({"cert":c1,"key":k1})
   if code!=200: tj_end(False,r.get("msg","rejected")); return False
-  d0=rjson(TLSC,{}); d0.update({"mode":p["mode"],"domain":dom,"prov":p["prov"],"suffix":p["suffix"],"duckname":p["duckname"],"email":p["email"]})
+  d0=rjson(TLSC,{}); d0.update({"mode":p["mode"],"domain":dom,"lineage":lin,"prov":p["prov"],"suffix":p["suffix"],"duckname":p["duckname"],"email":p["email"]})
   if p["duck"]: d0["duck"]=enc(p["duck"])
   wjson(TLSC,d0); tj_end(True,dom+" - the certificate renews automatically (certbot timer)")
   return True
 
 def tls_renew_start():
   c=tls_cfg(); dom=c["domain"]
-  lin=dom+("-staging" if c["staging"] else "")
+  lin=tls_lineage(c)
   if c["mode"] not in ("own","free") or not dom or not os.path.isdir(os.path.join(le_dir(),"live",lin)):
     return 400,{"ok":0,"msg":"There is no Let's Encrypt certificate from this panel to renew: use \"Get domain and certificate\" first"}
   with TJL:
@@ -1771,14 +1795,24 @@ def _tls_renew(dom):
 
 def cli_cert_renewed(lineage):
   # called by the certbot deploy hook after a renewal
-  dom=str(rjson(TLSC,{}).get("domain","")); lineage=str(lineage).rstrip("/")
-  if not dom or os.path.basename(lineage) not in (dom,dom+"-staging"): return 0
+  c=tls_cfg(); lineage=str(lineage).rstrip("/")
+  if not c["domain"] or os.path.basename(lineage)!=tls_lineage(c): return 0           # only the lineage that is installed: a leftover staging (or old) lineage must not replace the real certificate
   try: c1=open(lineage+"/fullchain.pem").read(); k1=open(lineage+"/privkey.pem").read()
   except Exception as e: print(e); return 1
   code,r=cert_save({"cert":c1,"key":k1})
   if code!=200: print(r.get("msg","")); return 1
-  cmd(["systemctl","--no-block","restart","sshplus-panel"])                  # the panel loads the certificate at start
+  try: open(CERT_RELOAD,"w").close()                                          # the running panel reloads the certificate itself: no restart (it would end a running job and sign everybody out)
+  except OSError: pass
   return 0
+
+CERT_RELOAD="/etc/SSHPlus/cert.reload"
+def cert_reload_check():
+  if not os.path.exists(CERT_RELOAD): return
+  try: os.remove(CERT_RELOAD)
+  except OSError: pass
+  if SRV[0] is not None:
+    try: SRV[0].ctx=tls_ctx()
+    except Exception: pass
 
 # ---- 2) encrypted backup / restore
 BK_MAGIC=b"CKBK1"

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.2 — Certificate flow fixes
+### Fixed
+- **Renewing or re-issuing the certificate from the panel restarted the panel in the middle of the job.** certbot's deploy hook called `systemctl restart sshplus-panel`, so the running renew job died with it: the page lost its connection, the session token was gone (signed out), the job state vanished and success was never shown, although the certificate had been renewed. The hook now only asks the running panel to reload its certificate (flag file `/etc/SSHPlus/cert.reload`, picked up within 3 s, the HTTPS context is swapped in place); nothing is restarted. Checked in the lab with a certbot stand-in that runs the deploy hook like the real one: the job finishes with all 3 steps, the token stays valid and the new certificate is served.
+- **A leftover `-staging` certificate could overwrite the real one.** After trying the staging CA and then switching it off, both certbot lineages existed; at the next automatic renewal of the staging lineage the hook installed the untrusted staging certificate over the production one (clients saw certificate errors every ~60 days). The panel now records which lineage is installed and only that one may replace the certificate (also used by the "Renew certificate" button, which no longer depends on the staging checkbox being unchanged).
+- Before asking Let's Encrypt, the panel checks the domain's **AAAA (IPv6) record**: Let's Encrypt tries IPv6 first, so an AAAA record that is not this server made the request fail with an unclear certbot error; it now stops with a clear message.
+- An e-mail address can no longer start with `-` (it would have been read as a certbot option).
+
 ## v1.8.1 — Connection limit fixed: extra IPs are cut, working ones stay
 ### Fixed
 - **A connection over the limit disrupted the user's working connections.** The monitor cut the *oldest* sessions when an account had more sessions than its limit, so one extra connection killed the connection that was in use (and clients that reconnect kept cycling). Now the limit counts **concurrent IPs** (devices): several connections from the same IP count once, the IPs that were connected first keep working untouched, and every session of the newer IPs is cut. Order is by process start time, not pid. Sessions whose client address is unknown (entry via server 2 shows the tunnel peer, OpenSSH sessions without a visible peer) still count one by one.
