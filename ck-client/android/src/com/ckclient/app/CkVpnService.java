@@ -173,26 +173,22 @@ public class CkVpnService extends VpnService {
             if (!running) return; // the user pressed Disconnect meanwhile
             if (engineError[0] != null) { fail(engineError[0]); return; }
 
-            // SSH is up: create the TUN interface and hand its packets to the engine.
-            Builder b = new Builder();
-            b.setSession("CK Client");
-            b.setMtu(1200);
-            b.addAddress("10.77.0.2", 24);
-            b.addRoute("0.0.0.0", 0);
-            try { b.addAddress("fd77:77::2", 64); b.addRoute("::", 0); } catch (Exception ignored) { } // IPv6 into the tunnel: no leak
-            boolean anyDns = false;
-            for (String d : p.dns.split(",")) {
-                d = d.trim();
-                if (d.length() > 0 && d.matches("[0-9a-fA-F.:]+")) {
-                    try { b.addDnsServer(d); anyDns = true; } catch (Exception ignored) { }
+            // SSH is up: create the TUN interface. Some phones refuse the IPv6 address (or a /24):
+            // try the full set first, then IPv4 only, then a /32.
+            int[][] attempts = {{1, 24}, {0, 24}, {0, 32}};
+            tun = null;
+            for (int[] at : attempts) {
+                try {
+                    tun = configure(p, at[0] == 1, at[1]).establish();
+                    if (tun != null) break;
+                    fail(getString(R.string.err_perm));
+                    return;
+                } catch (Exception e) {
+                    log("VPN interface (" + (at[0] == 1 ? "IPv4+IPv6" : "IPv4 only") + ", /" + at[1] + ") failed: " + e.getMessage());
                 }
             }
-            if (!anyDns) { b.addDnsServer("1.1.1.1"); b.addDnsServer("8.8.8.8"); }
-            try { b.addDisallowedApplication(getPackageName()); } catch (Exception ignored) { }
-            b.setBlocking(true);
-            b.setConfigureIntent(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), pendingFlags()));
-            tun = b.establish();
-            if (tun == null) { fail(getString(R.string.err_perm)); return; }
+            if (tun == null) { fail(getString(R.string.err_tun)); return; }
+            if (!running) return;
 
             server.setSoTimeout(15000);
             sock = server.accept();
@@ -205,6 +201,30 @@ public class CkVpnService extends VpnService {
         } catch (Exception e) {
             if (running) fail(String.valueOf(e.getMessage()));
         }
+    }
+
+    private Builder configure(Profile p, boolean ipv6, int prefix4) {
+        Builder b = new Builder();
+        b.setSession("CK Client");
+        b.setMtu(1200);
+        b.addAddress("10.77.0.2", prefix4);
+        b.addRoute("0.0.0.0", 0);
+        if (ipv6) { // IPv6 into the tunnel too, so it cannot leak around it
+            b.addAddress("fd77:77::2", 128);
+            b.addRoute("::", 0);
+        }
+        boolean anyDns = false;
+        for (String d : p.dns.split(",")) {
+            d = d.trim();
+            if (d.length() > 0 && d.matches("[0-9a-fA-F.:]+")) {
+                try { b.addDnsServer(d); anyDns = true; } catch (Exception ignored) { }
+            }
+        }
+        if (!anyDns) { b.addDnsServer("1.1.1.1"); b.addDnsServer("8.8.8.8"); }
+        try { b.addDisallowedApplication(getPackageName()); } catch (Exception ignored) { }
+        b.setBlocking(true);
+        b.setConfigureIntent(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), pendingFlags()));
+        return b;
     }
 
     private static int pendingFlags() {
