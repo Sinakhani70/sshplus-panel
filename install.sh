@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.8.3  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.8.4  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.8.3"
+VERSION="1.8.4"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -3262,7 +3262,8 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
   <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>
   <label>Username</label><input id="lu" value="admin" autocapitalize="none" autocorrect="off">
   <label>Password</label><input id="lp" type="password" value="admin" autocapitalize="none" onkeydown="if(event.key==='Enter')login()">
-  <button class="btn" style="width:100%" onclick="login()">ورود / Login</button>
+  <button id="lBtn" class="btn" style="width:100%" onclick="login()">ورود / Login</button>
+  <div id="lErr" role="alert" style="color:var(--er);font-size:.8rem;line-height:1.8;margin-top:.6rem;text-align:center"></div>
 </div></div>
 
 <div id="fpBox" class="modal hid" style="z-index:120"><div class="card" style="width:100%;max-width:380px">
@@ -3792,13 +3793,19 @@ async function saveFp(){
   if(j.ok){tok=j.tok;lsSet("tok",tok);$("fpBox").classList.add("hid");$("fp1").value="";$("fp2").value="";$("lp").value="";load(1);loadTpl().catch(()=>{})}else alert(j.msg||"Error");
 }
 async function login(){
-  let r,j;
-  try{r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})})}
-  catch(e){alert(L("اتصال به پنل برقرار نشد (شبکه، فیلترینگ یا DNS). اگر فقط با دامنه این‌طور است، با آدرس IP امتحان کن.","Could not reach the panel (network, filtering or DNS). If this only happens with the domain name, try the IP address."));return}
-  if(r.status===429){alert("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید");return}
-  if(r.status===403){alert(L("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list."));return}
-  try{j=await r.json()}catch(e){alert(L("پاسخ نامعتبر از سرور (HTTP "+r.status+"): احتمالاً یک پروکسی، فایروال یا Cloudflare بین تو و پنل است.","Invalid answer from the server (HTTP "+r.status+"): a proxy, firewall or Cloudflare is probably between you and the panel."));return}
-  if(j.tok){tok=j.tok;lsSet("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else alert("نام کاربری یا رمز عبور اشتباه است");
+  // every outcome is shown inside the login box (not only in a pop-up that a browser or extension may suppress), and a request that never gets an answer ends after 15 s
+  const E=$("lErr"), B=$("lBtn"), say=(fa,en)=>{E.innerText=L(fa,en)}, done=()=>{B.disabled=false};
+  E.innerText=""; B.disabled=true; const lbl=B.innerText; B.innerText="…";
+  const ac=new AbortController(), to=setTimeout(()=>ac.abort(),15000); let r,j;
+  try{r=await fetch("/api/login",{method:"POST",signal:ac.signal,headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})})}
+  catch(e){clearTimeout(to);B.innerText=lbl;done();
+    say(e&&e.name==="AbortError"?"پنل ۱۵ ثانیه جواب نداد: درخواست ورود در مسیر شبکه (فیلتر، پروکسی یا فایروال) گم می‌شود. با آدرس IP امتحان کن.":"اتصال به پنل برقرار نشد (شبکه، فیلترینگ یا DNS). اگر فقط با دامنه این‌طور است، با آدرس IP امتحان کن.",
+        e&&e.name==="AbortError"?"The panel gave no answer for 15 s: the login request is being lost on the network path (filter, proxy or firewall). Try the IP address.":"Could not reach the panel (network, filtering or DNS). If this only happens with the domain name, try the IP address.");return}
+  clearTimeout(to); B.innerText=lbl; done();
+  if(r.status===429){say("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید","Too many failed attempts: wait 5 minutes");return}
+  if(r.status===403){say("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list.");return}
+  try{j=await r.json()}catch(e){say("پاسخ نامعتبر از سرور (HTTP "+r.status+"): احتمالاً یک پروکسی، فایروال یا Cloudflare بین تو و پنل است.","Invalid answer from the server (HTTP "+r.status+"): a proxy, firewall or Cloudflare is probably between you and the panel.");return}
+  if(j.tok){tok=j.tok;lsSet("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else say("نام کاربری یا رمز عبور اشتباه است","Wrong username or password");
 }
 function portOpts(sp,db,tl){
   let o='<option value="All">همه پورت‌ها</option>';

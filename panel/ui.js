@@ -139,13 +139,19 @@ async function saveFp(){
   if(j.ok){tok=j.tok;lsSet("tok",tok);$("fpBox").classList.add("hid");$("fp1").value="";$("fp2").value="";$("lp").value="";load(1);loadTpl().catch(()=>{})}else alert(j.msg||"Error");
 }
 async function login(){
-  let r,j;
-  try{r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})})}
-  catch(e){alert(L("اتصال به پنل برقرار نشد (شبکه، فیلترینگ یا DNS). اگر فقط با دامنه این‌طور است، با آدرس IP امتحان کن.","Could not reach the panel (network, filtering or DNS). If this only happens with the domain name, try the IP address."));return}
-  if(r.status===429){alert("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید");return}
-  if(r.status===403){alert(L("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list."));return}
-  try{j=await r.json()}catch(e){alert(L("پاسخ نامعتبر از سرور (HTTP "+r.status+"): احتمالاً یک پروکسی، فایروال یا Cloudflare بین تو و پنل است.","Invalid answer from the server (HTTP "+r.status+"): a proxy, firewall or Cloudflare is probably between you and the panel."));return}
-  if(j.tok){tok=j.tok;lsSet("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else alert("نام کاربری یا رمز عبور اشتباه است");
+  // every outcome is shown inside the login box (not only in a pop-up that a browser or extension may suppress), and a request that never gets an answer ends after 15 s
+  const E=$("lErr"), B=$("lBtn"), say=(fa,en)=>{E.innerText=L(fa,en)}, done=()=>{B.disabled=false};
+  E.innerText=""; B.disabled=true; const lbl=B.innerText; B.innerText="…";
+  const ac=new AbortController(), to=setTimeout(()=>ac.abort(),15000); let r,j;
+  try{r=await fetch("/api/login",{method:"POST",signal:ac.signal,headers:{"Content-Type":"application/json"},body:JSON.stringify({u:$("lu").value.trim(),p:$("lp").value.trim()})})}
+  catch(e){clearTimeout(to);B.innerText=lbl;done();
+    say(e&&e.name==="AbortError"?"پنل ۱۵ ثانیه جواب نداد: درخواست ورود در مسیر شبکه (فیلتر، پروکسی یا فایروال) گم می‌شود. با آدرس IP امتحان کن.":"اتصال به پنل برقرار نشد (شبکه، فیلترینگ یا DNS). اگر فقط با دامنه این‌طور است، با آدرس IP امتحان کن.",
+        e&&e.name==="AbortError"?"The panel gave no answer for 15 s: the login request is being lost on the network path (filter, proxy or firewall). Try the IP address.":"Could not reach the panel (network, filtering or DNS). If this only happens with the domain name, try the IP address.");return}
+  clearTimeout(to); B.innerText=lbl; done();
+  if(r.status===429){say("تلاش‌های ناموفق زیاد؛ ۵ دقیقه صبر کنید","Too many failed attempts: wait 5 minutes");return}
+  if(r.status===403){say("آدرس شما در لیست آدرس‌های مجاز پنل نیست.","Your address is not in the panel's allowed list.");return}
+  try{j=await r.json()}catch(e){say("پاسخ نامعتبر از سرور (HTTP "+r.status+"): احتمالاً یک پروکسی، فایروال یا Cloudflare بین تو و پنل است.","Invalid answer from the server (HTTP "+r.status+"): a proxy, firewall or Cloudflare is probably between you and the panel.");return}
+  if(j.tok){tok=j.tok;lsSet("tok",tok);$("lBox").classList.add("hid");if(j.chg)showFp();else{load(1);loadTpl().catch(()=>{})}}else say("نام کاربری یا رمز عبور اشتباه است","Wrong username or password");
 }
 function portOpts(sp,db,tl){
   let o='<option value="All">همه پورت‌ها</option>';
