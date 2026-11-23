@@ -434,6 +434,46 @@ class SecurityHardening(unittest.TestCase):
         app.TOK.clear(); app.FAIL.clear()
 
 
+class ConnectionLimit(unittest.TestCase):
+    def test_extra_devices_are_cut_oldest_stay(self):
+        sip = {10: "1.1.1.1", 11: "1.1.1.1", 12: "1.1.1.1", 20: "2.2.2.2", 30: "3.3.3.3", 31: "3.3.3.3"}
+        start = {10: 100, 11: 105, 12: 110, 20: 200, 30: 300, 31: 301}
+        vic, dips = app.limit_victims(list(sip), 2, sip, start)
+        self.assertEqual(sorted(vic), [30, 31]); self.assertEqual(dips, ["3.3.3.3"])        # the working devices are untouched, the newest IP goes
+        self.assertEqual(app.limit_victims(list(sip), 3, sip, start), ([], []))
+        self.assertEqual(app.limit_victims(list(sip), 1, sip, start)[1], ["2.2.2.2", "3.3.3.3"])
+        self.assertEqual(len(app.limit_groups(list(sip), sip)), 3)                          # three devices, six connections
+
+    def test_pid_numbers_do_not_decide_who_is_oldest(self):
+        sip = {5: "9.9.9.9", 900: "8.8.8.8"}                                               # a low pid can belong to the newer session (pid wrap)
+        vic, dips = app.limit_victims([5, 900], 1, sip, {5: 500, 900: 50})
+        self.assertEqual((vic, dips), ([5], ["9.9.9.9"]))
+
+    def test_unknown_addresses_count_one_by_one(self):
+        sip = {1: "", 2: "", 3: "4.4.4.4"}
+        self.assertEqual(len(app.limit_groups([1, 2, 3], sip)), 3)
+        vic, dips = app.limit_victims([1, 2, 3], 2, sip, {1: 10, 2: 20, 3: 30})
+        self.assertEqual((vic, dips), ([3], ["4.4.4.4"]))
+        vic, dips = app.limit_victims([1, 2], 1, {1: "", 2: ""}, {1: 10, 2: 20}); self.assertEqual((vic, dips), ([2], []))
+
+    def test_limit_is_never_below_one(self):
+        self.assertEqual(app.limit_victims([1, 2], 0, {1: "a", 2: "b"}, {1: 1, 2: 2}), ([2], ["b"]))
+
+    def test_pid_start_and_ss_parse(self):
+        self.assertLess(app.pid_start(os.getpid()), 1 << 60); self.assertEqual(app.pid_start(2 ** 30), 1 << 62)
+        out = ('0 0 10.0.0.1:442 203.0.113.7:50111 users:(("dropbear",pid=1871,fd=3))\n'
+               '0 0 10.0.0.1:22 [::ffff:198.51.100.2]:4000 users:(("sshd",pid=300,fd=4),("sshd",pid=250,fd=4))\n')
+        keep = app.cmd
+        try:
+            app.cmd = lambda c, *a, **k: (0, out, ""); m = app.ss_peers()
+        finally: app.cmd = keep
+        self.assertEqual(m[1871], ("203.0.113.7", 50111)); self.assertEqual(m[300], ("198.51.100.2", 4000)); self.assertEqual(m[250], m[300])
+
+    def test_dropped_ips_are_pruned_and_listed(self):
+        app.DROP.clear(); now = time.time(); app.DROP["bob"] = {"1.2.3.4": now - 1000, "5.6.7.8": now - 10}
+        app.prune_auth(); self.assertEqual(app.DROP, {"bob": {"5.6.7.8": app.DROP["bob"]["5.6.7.8"]}}); app.DROP.clear()
+
+
 class NetMonitor(unittest.TestCase):
     PING = """PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
 64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=50.0 ms
