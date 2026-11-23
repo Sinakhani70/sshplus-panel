@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.4 — Login box shows what is happening
+### Fixed
+- If the login request got **no answer at all** (a network path that swallows the request, seen with a domain name while the IP worked), the page just sat there: the pop-up message could not appear because nothing ever failed. The login button now shows "…" and is disabled while waiting, a request without an answer ends after 15 s, and every outcome (wrong password, cannot reach the panel, no answer in 15 s, invalid/HTML answer, locked for 5 minutes, address not allowed) is written **inside the login box**, not only in a pop-up that a browser or extension can suppress. Checked in a real browser for all five failure types.
+
 ## v1.8.3 — Login page: no more silent failures
 ### Fixed
 - **The login page could stay on screen doing nothing, with no message.** Three failures were swallowed silently (reproduced in a real browser): the browser refusing `localStorage` (private mode, site data blocked for that address, some in-app browsers) broke the script at start-up and again right after a successful login; a cut connection or reset on the login request; and a non-JSON answer (an HTML page from a proxy, firewall, Cloudflare or an ISP). Each address (the IP and a domain name) is a separate browser origin with its own storage, so a problem could show up with one and not the other. The token is now kept in memory when storage is blocked (the session works, it just is not remembered), and every failure shows what happened: cannot reach the panel (network / filtering / DNS), HTTP status and "a proxy or firewall is probably in the way", or "your address is not in the allowed list". The server side was checked with a domain name (SNI + Host header): login works exactly as with the IP.
