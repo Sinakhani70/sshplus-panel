@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.5 — The panel page survives a network that cuts long transfers
+### Fixed
+- **"Uncaught ReferenceError: login is not defined" on one address only.** The page (137 KB) shows its markup first and its script after the first 46 KB. On a network path that cuts the connection to a given address after a few KB (seen with a domain name while the IP worked), the layout and the login box appeared but the script never arrived, so *Login* did nothing and the console only said `login is not defined`. Two changes: the page is now sent **gzip-compressed (137 KB to 40 KB)** when the browser accepts it (content is byte-identical after decoding), and a tiny stub at the very start of the page makes *Login* say "the page was only partly loaded (the connection to this address was cut): try the IP address or another network" instead of failing silently. Checked in a real browser with the page cut after 40 KB and after 70 KB.
+
 ## v1.8.4 — Login box shows what is happening
 ### Fixed
 - If the login request got **no answer at all** (a network path that swallows the request, seen with a domain name while the IP worked), the page just sat there: the pop-up message could not appear because nothing ever failed. The login button now shows "…" and is disabled while waiting, a request without an answer ends after 15 s, and every outcome (wrong password, cannot reach the panel, no answer in 15 s, invalid/HTML answer, locked for 5 minutes, address not allowed) is written **inside the login box**, not only in a pop-up that a browser or extension can suppress. Checked in a real browser for all five failure types.
