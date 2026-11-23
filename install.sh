@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.8.4  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.8.5  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.8.4"
+VERSION="1.8.5"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -2966,7 +2966,7 @@ def hist_get():
   return {"s":h.get("s",[]),"d":{k:h["d"][k] for k in days}}
 
 # ---------- HTTP ----------
-import ipaddress
+import ipaddress, gzip
 def req_len(raw,path):
   # Content-Length of a request body: (bytes, 0) or (0, http status). Negative / non-numeric / oversize bodies are refused before reading
   try: n=int(str(raw if raw is not None else "0").strip())
@@ -3066,8 +3066,10 @@ class H(BaseHTTPRequestHandler):
       p=urlparse(s.path).path
       if s.blocked(p): s.js({"err":3},403); return
       if p in ("/","/index.html"):
-        b=open(HTML,"rb").read()
-        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
+        b=open(HTML,"rb").read(); gz="gzip" in s.headers.get("Accept-Encoding","").lower()
+        if gz: b=gzip.compress(b,6)                       # 134 KB -> ~40 KB: far less to get through a network that cuts long transfers
+        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache"); s.send_header("Vary","Accept-Encoding")   # no-cache: revalidate, a panel update shows up without a hard refresh
+        if gz: s.send_header("Content-Encoding","gzip")
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
@@ -3257,6 +3259,11 @@ table{width:100%;border-collapse:collapse;font-size:.86rem}th,td{padding:.6rem;t
 </style>
 </head>
 <body>
+<script>
+/* first bytes of the page: if the rest (the main script) never arrives - a network path that cuts the connection after a few KB - "Login" explains it instead of failing with "login is not defined".
+   The real login() in the main script replaces this stub. */
+function login(){var e=document.getElementById("lErr"),m="The page was only partly loaded (the connection to this address was cut). Try the IP address instead of the domain name, or another network. / صفحه ناقص بارگذاری شد (اتصال به این آدرس قطع شده). با آدرس IP به‌جای دامنه یا با شبکه‌ی دیگری امتحان کن.";if(e)e.innerText=m;else alert(m)}
+</script>
 <div id="lBox" class="modal"><div class="card" style="width:100%;max-width:350px">
   <div style="text-align:end;margin:-.2rem 0 .2rem"><button class="btn btn-s langBtn" onclick="toggleLang()" title="Language / زبان">EN</button></div>
   <div style="display:flex;flex-direction:column;align-items:center;gap:.4rem;margin-bottom:.9rem"><svg width="56" height="56" viewBox="0 0 48 48" role="img" aria-label="CK.VPN"><defs><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#06b6d4"/><stop offset="1" stop-color="#6366f1"/></linearGradient></defs><rect width="48" height="48" rx="12" fill="url(#lg2)"/><path d="M11 31a13 13 0 0 1 26 0" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="3" stroke-linecap="round"/><circle cx="11" cy="31" r="2.6" fill="#fff"/><circle cx="37" cy="31" r="2.6" fill="#fff"/><text x="24" y="30" text-anchor="middle" font-family="system-ui,Arial,sans-serif" font-weight="800" font-size="18" fill="#fff">CK</text></svg><h3 style="color:var(--pr)">CK.VPN</h3><div style="font-size:.72rem;color:var(--mu)" dir="ltr">Panel Login · v__VERSION__</div></div>

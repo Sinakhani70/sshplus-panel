@@ -2206,7 +2206,7 @@ def hist_get():
   return {"s":h.get("s",[]),"d":{k:h["d"][k] for k in days}}
 
 # ---------- HTTP ----------
-import ipaddress
+import ipaddress, gzip
 def req_len(raw,path):
   # Content-Length of a request body: (bytes, 0) or (0, http status). Negative / non-numeric / oversize bodies are refused before reading
   try: n=int(str(raw if raw is not None else "0").strip())
@@ -2306,8 +2306,10 @@ class H(BaseHTTPRequestHandler):
       p=urlparse(s.path).path
       if s.blocked(p): s.js({"err":3},403); return
       if p in ("/","/index.html"):
-        b=open(HTML,"rb").read()
-        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache")   # revalidate: a panel update shows up without a hard refresh
+        b=open(HTML,"rb").read(); gz="gzip" in s.headers.get("Accept-Encoding","").lower()
+        if gz: b=gzip.compress(b,6)                       # 134 KB -> ~40 KB: far less to get through a network that cuts long transfers
+        s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache"); s.send_header("Vary","Accept-Encoding")   # no-cache: revalidate, a panel update shows up without a hard refresh
+        if gz: s.send_header("Content-Encoding","gzip")
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
