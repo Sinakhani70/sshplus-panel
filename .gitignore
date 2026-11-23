@@ -3,3 +3,4 @@ __pycache__/
 ck-client/dist/*
 !ck-client/dist/ck-client.exe
 !ck-client/dist/CK-Client-Setup.exe
+!ck-client/dist/CK-Client.apk

@@ -11,6 +11,7 @@ import "encoding/json"
 type profile struct {
 	Name         string   `json:"name"`
 	Host         string   `json:"host"`
+	DialAddr     string   `json:"dialAddr,omitempty"` // optional resolved IP to connect to (Android resolves DNS before the VPN starts)
 	Port         int      `json:"port"`
 	User         string   `json:"user"`
 	Password     string   `json:"password,omitempty"`

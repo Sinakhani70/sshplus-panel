@@ -27,6 +27,9 @@ Closing the window while connected hides it to the tray (right-click the tray ic
 ./build.sh        # tests + cross-compile -> dist/ck-client.exe
 ```
 
+## Android
+A native Android app (APK for Android 5.0+, arm64 / armv7 / x86_64) is in [`android/`](android/README.md); download: `dist/CK-Client.apk`. It has not been run on a phone yet.
+
 ## iOS
 A first iOS implementation (SwiftUI + Network Extension on the shared Go core `ckcore/`) is in [`ios/`](ios/README.md); it needs a Mac, Xcode and a paid Apple Developer account, and has not been run on a device yet.
 

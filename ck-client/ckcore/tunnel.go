@@ -187,8 +187,12 @@ func (t *tunnel) connect() (*ssh.Client, error) {
 		ClientVersion:   "SSH-2.0-CKClient",
 	}
 	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	dial := addr
+	if p.DialAddr != "" {
+		dial = net.JoinHostPort(p.DialAddr, strconv.Itoa(p.Port))
+	}
 	d := net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
-	raw, err := d.DialContext(t.ctx, "tcp", addr)
+	raw, err := d.DialContext(t.ctx, "tcp", dial)
 	if err != nil {
 		return nil, err
 	}

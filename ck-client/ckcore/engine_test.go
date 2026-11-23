@@ -150,7 +150,7 @@ type phone struct {
 	ep *channel.Endpoint
 }
 
-func newPhone(t *testing.T, eng *Engine) *phone {
+func newPhone(t *testing.T, send func([]byte)) *phone {
 	ep := channel.New(512, MTU, "")
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
@@ -178,7 +178,7 @@ func newPhone(t *testing.T, eng *Engine) *phone {
 			data := buf.Flatten()
 			buf.Release()
 			pkt.DecRef()
-			eng.InputPacket(data)
+			send(data)
 		}
 	}()
 	return ph
@@ -230,7 +230,7 @@ func setup(t *testing.T) (*Engine, *phone, *events) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ph := newPhone(t, eng)
+	ph := newPhone(t, eng.InputPacket)
 	sk.f = ph.deliver
 	if err := eng.Start(); err != nil {
 		t.Fatal(err)
