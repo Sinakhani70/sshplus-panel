@@ -193,6 +193,7 @@ func decodePayload(p []byte) (flags byte, id uint16, src netip.AddrPort, data []
 }
 
 func (g *UDPGW) readLoop(c net.Conn) {
+	defer recoverLog()
 	defer g.dropConn(c)
 	var hdr [2]byte
 	for {
@@ -225,6 +226,7 @@ func (g *UDPGW) readLoop(c net.Conn) {
 }
 
 func (g *UDPGW) keepaliveLoop(c net.Conn) {
+	defer recoverLog()
 	t := time.NewTicker(udpgwKeepalive)
 	defer t.Stop()
 	for range t.C {

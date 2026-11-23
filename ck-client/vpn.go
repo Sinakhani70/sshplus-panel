@@ -32,8 +32,12 @@ func addrString(a tcpip.Address) netip.Addr {
 
 // The gVisor forwarder calls HandleTCP/HandleUDP on its packet-processing
 // goroutine, so they must return immediately: all real work runs in a new goroutine.
-func (h *vpnHandler) HandleTCP(c adapter.TCPConn) { go h.handleTCP(c) }
-func (h *vpnHandler) HandleUDP(c adapter.UDPConn) { go h.handleUDP(c) }
+func (h *vpnHandler) HandleTCP(c adapter.TCPConn) {
+	go func() { defer recoverLog(); h.handleTCP(c) }()
+}
+func (h *vpnHandler) HandleUDP(c adapter.UDPConn) {
+	go func() { defer recoverLog(); h.handleUDP(c) }()
+}
 
 func (h *vpnHandler) handleTCP(c adapter.TCPConn) {
 	id := c.ID()

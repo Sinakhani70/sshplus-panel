@@ -72,6 +72,7 @@ func (t *Tunnel) PingMs() int64 { return t.ping.Load() }
 
 func (t *Tunnel) pingLoop() {
 	defer t.wg.Done()
+	defer recoverLog()
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
 	for {
@@ -167,6 +168,7 @@ func (t *Tunnel) clearClient() {
 
 func (t *Tunnel) supervise(c *ssh.Client) {
 	defer t.wg.Done()
+	defer recoverLog()
 	backoff := time.Second
 	for {
 		// keep-alive until the connection dies

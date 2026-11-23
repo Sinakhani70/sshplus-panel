@@ -254,6 +254,7 @@ func removeNRPT() {
 // selfTest logs the exit IP seen through the SSH tunnel and the one seen by a
 // normal Windows connection; if they differ the OS routes are not effective.
 func selfTest(t *Tunnel, logf func(string, ...any)) {
+	defer recoverLog()
 	time.Sleep(2 * time.Second)
 	trace := func(c net.Conn) string {
 		defer c.Close()

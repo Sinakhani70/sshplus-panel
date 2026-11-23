@@ -11,6 +11,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -56,14 +57,44 @@ func darkTitleBar(w walk.Window) {
 	pDwmSetWinAtt.Call(uintptr(w.Handle()), 20, uintptr(unsafe.Pointer(&v)), 4) // DWMWA_USE_IMMERSIVE_DARK_MODE
 }
 
+// Brushes and fonts are cached: the status card repaints every second, and creating new GDI
+// objects on each paint (and never freeing them) exhausted Windows' 10,000-object limit after a few minutes.
+var (
+	cacheMu sync.Mutex
+	brushes = map[walk.Color]walk.Brush{}
+	fonts   = map[[2]int]*walk.Font{}
+)
+
 func brush(c walk.Color) walk.Brush {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if b, ok := brushes[c]; ok {
+		return b
+	}
 	b, _ := walk.NewSolidColorBrush(c)
+	brushes[c] = b
 	return b
 }
 
 func font(size int, style walk.FontStyle) *walk.Font {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	k := [2]int{size, int(style)}
+	if f, ok := fonts[k]; ok {
+		return f
+	}
 	f, _ := walk.NewFont("Segoe UI", size, style)
+	fonts[k] = f
 	return f
+}
+
+var pGetGuiResources = windows.NewLazySystemDLL("user32.dll").NewProc("GetGuiResources")
+
+// gdiObjects returns this process' GDI object count (limit 10,000) for the log.
+func gdiObjects() int {
+	h, _ := windows.GetCurrentProcess()
+	n, _, _ := pGetGuiResources.Call(uintptr(h), 0) // GR_GDIOBJECTS
+	return int(n)
 }
 
 func fmtBytes(n int64) string {
@@ -173,8 +204,12 @@ func runUI(app *App, connect string) {
 	}
 	// refresh loop
 	go func() {
+		n := 0
 		for range time.Tick(time.Second) {
 			g.mw.Synchronize(g.refresh)
+			if n++; n%300 == 0 { // every 5 minutes: a rising number would show a resource leak
+				app.logf("GDI objects in use: %d / 10000", gdiObjects())
+			}
 		}
 	}()
 	g.mw.Run()
