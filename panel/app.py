@@ -8,7 +8,7 @@ CFG="/etc/SSHPlus/panel.json"; DB="/root/users.db"; META="/etc/SSHPlus/meta.json
 PORTS="/etc/SSHPlus/ports.json"; BV="/etc/SSHPlus/badvpn.conf"
 BBRF="/etc/sysctl.d/99-sshplus-bbr.conf"; SHELL="/usr/local/bin/sshplus-shell"; SHELL_T=SHELL+"-t"
 HTML="/opt/sshplus-panel/index.html"; SSHCONF="/etc/ssh/sshd_config.d/00-sshplus.conf"
-TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}; DBA={}; IPS={}
+TOK={}; PIDS={}; FAIL={}; DBU={}; DBT={}; DBA={}; IPS={}; SIP={}; IPC={}; GRP={}; DROP={}
 STATE={"first":True}; CACHE={"t":0.0,"v":None}; SSHP={"t":0.0,"v":set()}
 LOCK=threading.Lock(); ML=threading.RLock()
 ENV={"LC_ALL":"C","PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
@@ -133,6 +133,38 @@ def fmt_traffic(ub):
   return f"{round(ub/1073741824.0,2)} GB"
 
 # ---------- session detection ----------
+def ss_peers():
+  # pid -> (client ip, client port) of every established TCP connection, straight from the kernel (no log parsing, no delay)
+  rc,o,_=cmd(["ss","-tnpH","state","established"],10); m={}
+  for l in (o.splitlines() if rc==0 else []):
+    f=l.split()
+    if len(f)<4 or ":" not in f[3]: continue
+    ip,_,port=f[3].rpartition(":")
+    ip=ip.strip("[]").replace("::ffff:","")
+    for pid in re.findall(r"pid=(\d+)",l): m.setdefault(int(pid),(ip,int(port) if port.isdigit() else 0))
+  return m
+
+def pid_start(pid):
+  # process start time (clock ticks since boot): orders sessions by age independently of pid numbers
+  try:
+    d=open("/proc/%d/stat"%pid).read()
+    return int(d[d.rindex(")")+2:].split()[19])
+  except Exception: return 1<<62
+
+def limit_groups(pids,sip):
+  # one "device" = one client IP (several connections from the same IP count once); a session whose address is unknown counts alone
+  g={}
+  for p in pids: g.setdefault(("ip",sip[p]) if sip.get(p) else ("s",p),[]).append(p)
+  return g
+
+def limit_victims(pids,ulim,sip,start):
+  # which sessions of ONE account must go: keep the `ulim` oldest devices untouched, cut every session of the newer ones.
+  # Returns (pids to kill, client IPs that were turned away)
+  g=limit_groups(pids,sip)
+  order=sorted(g.items(),key=lambda kv:(min(start.get(p,1<<62) for p in kv[1]),min(kv[1])))
+  drop=order[max(1,int(ulim)):]
+  return [p for _,ps in drop for p in ps],[k[1] for k,_ in drop if k[0]=="ip"]
+
 def _on_map():
   um=user_uid_map()
   sessions={u:[] for u in um}; io_pids={u:set() for u in um}
@@ -176,27 +208,34 @@ def _on_map():
   for k in [k for k in DBU if k not in wset]: DBU.pop(k,None)
   for k in [k for k in DBT if k not in wset]: DBT.pop(k,None)
   for k in [k for k in DBA if k not in wset]: DBA.pop(k,None)
-  unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>15]
+  unknown=[p for p in workers if p not in DBU and now-DBT.get(p,0)>3]
   if unknown:
     for p in unknown: DBT[p]=now
     _,j,_=cmd(["journalctl","-u","sshplus-dropbear","-u","sshplus-dropbear-t","-u","sshplus-dropbear-s","-u","sshplus-dropbear-ts","-u","sshplus-dropbear-g","-n","3000","--no-pager","-o","cat"],20)
     for jl in j.splitlines():
       mt=re.search(r"\[(\d+)\].*Password auth succeeded for '([^']+)' from (\S+):(\d+)\s*$",jl)
       if mt: DBU[int(mt.group(1))]=mt.group(2); DBA[int(mt.group(1))]=(mt.group(3),int(mt.group(4)))
-  ips={}; cip=None
   for dpid in workers:
     u=DBU.get(dpid)
     if u in um:
       io_pids[u].add(dpid)
       if dpid not in sessions[u]: sessions[u].append(dpid)
-      a=DBA.get(dpid)
+  # client address of every session (kernel socket table first, the auth log as a fallback)
+  ssm=ss_peers(); cip=None; sip={}; ipc={}
+  for u,ps in sessions.items():
+    for p in ps:
+      a=ssm.get(p) or DBA.get(p); ip=""
       if a:
-        ip=a[0]
-        if ip=="127.0.0.1":                                         # TLS: the real client address is in stunnel's log
+        ip,port=str(a[0]).replace("::ffff:",""),a[1]
+        if ip in ("127.0.0.1","::1"):                                 # TLS: the real client address is in stunnel's log
           if cip is None: cip=tls_client_ips()
-          ip=cip.get(a[1],"")
-        if ip: ips.setdefault(u,set()).add(ip)
-  IPS.clear(); IPS.update({k:sorted(v) for k,v in ips.items()})
+          ip=cip.get(port,"")
+        if ip.startswith("10.99.0."): ip=""                            # entry via server 2: this is the tunnel peer, not a client
+      sip[p]=ip
+      if ip: ipc.setdefault(u,{})[ip]=ipc.setdefault(u,{}).get(ip,0)+1
+  SIP.clear(); SIP.update(sip); IPC.clear(); IPC.update(ipc)
+  IPS.clear(); IPS.update({k:sorted(v) for k,v in ipc.items()})
+  GRP.clear(); GRP.update({u:len(limit_groups(ps,sip)) for u,ps in sessions.items() if ps})
   return ({k:v for k,v in sessions.items() if v},{k:list(v) for k,v in io_pids.items() if v})
 
 def on_map(force=False):
@@ -459,7 +498,8 @@ def get_users(om):
     m=meta.get(u,{}); q=float(m.get("q",0)); ub=int(m.get("u",0))
     res.append({"u":u,"pw":dec(m.get("pw","")),"lim":int(m.get("lim",lim.get(u,1))),"on":om.get(u,0),"exp":es,"dl":dl,
                 "expd":expd,"q":q,"ugb":fmt_traffic(ub),"qfull":(q>0 and ub>=int(q*1073741824)),
-                "pt":str(m.get("pt","All")),"tm":"tunnel" if is_tun(pm[u][1]) else "direct","cx":SHELL_OF.get(pm[u][1],("direct","both"))[1],"en":"B" if m.get("en")=="B" else "A","st":m.get("tok",""),"ips":IPS.get(u,[])})
+                "pt":str(m.get("pt","All")),"tm":"tunnel" if is_tun(pm[u][1]) else "direct","cx":SHELL_OF.get(pm[u][1],("direct","both"))[1],"en":"B" if m.get("en")=="B" else "A","st":m.get("tok",""),"ips":IPS.get(u,[]),"ipc":IPC.get(u,{}),"dev":GRP.get(u,0),
+                "drop":sorted(ip for ip,t in DROP.get(u,{}).items() if time.time()-t<300)})
   return res
 
 def refresh_lock(u):
@@ -522,7 +562,7 @@ def user_del(d):
   if u not in user_uid_map(): return 404,{"ok":0,"msg":"User not found"}
   _,io=on_map(True)
   for pid in io.get(u,[]): kill_pid(pid)
-  cmd(["pkill","-9","-u",u]); cmd(["userdel","-f",u])
+  cmd(["pkill","-9","-u",u]); cmd(["userdel","-f",u]); DROP.pop(u,None)
   with ML:
     ls=read_limits_db(); ls.pop(u,None); write_limits_db(ls)
     meta=rjson(META,{}); meta.pop(u,None); wjson(META,meta)
@@ -1259,9 +1299,12 @@ def mon():
             for pid in io_pids.get(u,[]): kill_pid(pid)
             continue
           ulim=max(1,int(m.get("lim",lim.get(u,1))))
-          sp=sorted(sessions.get(u,[]))
-          if len(sp)>ulim:
-            for old in sp[:-ulim]: kill_pid(old)     # oldest sessions are cut first
+          sp=sessions.get(u,[])
+          if len(sp)>1 and len(limit_groups(sp,SIP))>ulim:
+            # over the limit: the devices (client IPs) that were there first keep working, the newer ones are cut
+            vic,dips=limit_victims(sp,ulim,SIP,{p:pid_start(p) for p in sp})
+            for p in vic: kill_pid(p)
+            for ip in (dips or ["?"]): DROP.setdefault(u,{})[ip]=time.time()
         if ch: wjson(META,meta)
     except Exception: pass
     time.sleep(3)
@@ -2174,6 +2217,9 @@ def allow_save(d,me):
 
 def prune_auth():
   now=time.time()
+  for u in list(DROP):
+    DROP[u]={ip:t for ip,t in DROP[u].items() if now-t<600}
+    if not DROP[u]: DROP.pop(u,None)
   for t in [k for k,v in list(TOK.items()) if v<=now]: TOK.pop(t,None)
   for k in list(FAIL):
     FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]

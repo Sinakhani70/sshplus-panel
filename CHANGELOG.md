@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.8.1 — Connection limit fixed: extra IPs are cut, working ones stay
+### Fixed
+- **A connection over the limit disrupted the user's working connections.** The monitor cut the *oldest* sessions when an account had more sessions than its limit, so one extra connection killed the connection that was in use (and clients that reconnect kept cycling). Now the limit counts **concurrent IPs** (devices): several connections from the same IP count once, the IPs that were connected first keep working untouched, and every session of the newer IPs is cut. Order is by process start time, not pid. Sessions whose client address is unknown (entry via server 2 shows the tunnel peer, OpenSSH sessions without a visible peer) still count one by one.
+- **Connected IPs are shown for every session** (Dropbear, TLS, OpenSSH) from the kernel's socket table (`ss -tnp`) with the auth log as a fallback, so they appear immediately; the Users table shows `devices / limit`, the connection count, each IP with its number of connections and, in red, the IPs that were just cut (kept for 5 minutes). New Dropbear sessions are attributed to their account within 3 s instead of up to 15 s.
+- The field is now labelled "Concurrent IPs". Dropbear cannot refuse a login at authentication time, so an extra IP may connect for up to ~3 s (the monitor interval) before it is cut. A user who switches network (Wi-Fi to mobile data) keeps the old connection until it times out and may be turned away meanwhile: give such accounts a limit of 2.
+
 ## v1.8.0 — Gaming: stable ping, game accounts, network monitor, hardening
 ### Added
 - **Game Profile** (Settings): one switch applies `net.core.default_qdisc=fq`, `tcp_congestion_control=bbr`, `tcp_notsent_lowat=16384`, `tcp_slow_start_after_idle=0` and replaces the root qdisc of the WAN interface with `fq` (the sysctl only affects qdiscs created later). The previous runtime values are saved and restored exactly when it is switched off. Keys the kernel does not have and a missing BBR/`fq` are reported, never claimed; the BBR toggle is locked while the profile is on. The live state (current value vs. target, qdisc) is shown. Saved in `/etc/sysctl.d/99-sshplus-game.conf` (and `tcp_bbr` is loaded at boot).
