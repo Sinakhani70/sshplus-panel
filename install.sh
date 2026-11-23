@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  SSH Plus Panel v1.8.5  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
+#  SSH Plus Panel v1.8.6  -  OpenSSH + Dropbear (6 ports) + BadVPN UDPGW + BBR
 #                            + Tunnel (SSH tun to an exit server, one-click)
 #                            + SSH over TLS (stunnel, domain + Let's Encrypt from the panel)
 #  Target: Ubuntu 22.04 / 24.04 (fresh server), run as root.
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-VERSION="1.8.5"
+VERSION="1.8.6"
 LOG=/var/log/sshplus/install.log
 
 [ "$(id -u)" = 0 ] || { echo "باید با root اجرا کنی / run as root"; exit 1; }
@@ -3011,6 +3011,7 @@ def allow_save(d,me):
 
 def prune_auth():
   now=time.time()
+  for k in [k for k,v in list(NETRL.items()) if not v or now-v[-1]>60]: NETRL.pop(k,None)
   for u in list(DROP):
     DROP[u]={ip:t for ip,t in DROP[u].items() if now-t<600}
     if not DROP[u]: DROP.pop(u,None)
@@ -3021,6 +3022,33 @@ def prune_auth():
 
 def cli_allow_off():
   c=rjson(CFG,{}); c["allow"]=[]; wjson(CFG,c); print("IP allowlist cleared: the panel accepts every address again."); return 0
+
+
+NET_PAGE="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Network test</title>
+<style>body{font-family:sans-serif;background:#0b1120;color:#f3f4f6;margin:0;padding:1rem}table{border-collapse:collapse;width:100%;max-width:520px}td,th{padding:.35rem .6rem;border-bottom:1px solid #1f2937;text-align:left}.ok{color:#10b981}.er{color:#ef4444}.wn{color:#f59e0b}button{padding:.5rem 1rem;background:#06b6d4;border:0;border-radius:8px;color:#00131a;font-weight:700;cursor:pointer}</style></head><body>
+<h3>Transfer test / تست انتقال</h3>
+<p style="font-size:.85rem;color:#9ca3af;max-width:520px;line-height:1.7">Downloads random data of growing size from this address, each on a new connection, and shows where a transfer is cut. Run it on the address that fails (the domain) and on the one that works (the IP). / داده‌ی تصادفی با اندازه‌ی افزایشی از همین آدرس می‌گیرد و نشان می‌دهد انتقال از کجا قطع می‌شود. هم روی آدرسی که مشکل دارد (دامنه) اجرا کن و هم روی آدرسی که کار می‌کند (IP).</p>
+<button id="b" onclick="run()">Start / شروع</button><table id="t" style="margin-top:1rem"></table><p id="v" style="font-weight:700"></p>
+<script>
+var SZ=[2,4,8,12,16,24,32,48,64,96,128,192,256];
+async function one(kb){var ac=new AbortController(),to=setTimeout(function(){ac.abort()},10000),got=0,t0=Date.now();
+ try{var r=await fetch("/net/blob?n="+kb*1024+"&r="+Math.random(),{cache:"no-store",signal:ac.signal});if(!r.ok){clearTimeout(to);return{s:"er",m:"HTTP "+r.status,got:0}}
+  var rd=r.body.getReader();for(;;){var x=await rd.read();if(x.done)break;got+=x.value.length}clearTimeout(to);
+  return got>=kb*1024?{s:"ok",m:"complete",got:got,ms:Date.now()-t0}:{s:"er",m:"CUT after "+got+" bytes",got:got}}
+ catch(e){clearTimeout(to);return{s:"er",m:(e&&e.name==="AbortError"?"no data for 10 s (after "+got+" bytes)":"connection error after "+got+" bytes"),got:got}}}
+async function run(){var t=document.getElementById("t"),v=document.getElementById("v"),b=document.getElementById("b");b.disabled=true;t.innerHTML="<tr><th>Size</th><th>Result</th></tr>";v.innerText="";var last=0,first=0;
+ for(var i=0;i<SZ.length;i++){var r=await one(SZ[i]);t.innerHTML+='<tr><td>'+SZ[i]+' KB</td><td class="'+r.s+'">'+r.m+(r.ms?" ("+r.ms+" ms)":"")+"</td></tr>";if(r.s==="ok")last=SZ[i];else if(!first)first=SZ[i]}
+ v.innerHTML=!first?'<span class="ok">Everything arrived (up to '+last+' KB). / همه‌چیز کامل رسید.</span>':'<span class="er">Largest complete transfer: '+(last||"none")+' KB; first failure at '+first+' KB. / بزرگ‌ترین انتقال کامل: '+(last||"هیچ")+' کیلوبایت؛ اولین شکست در '+first+' کیلوبایت.</span>';b.disabled=false}
+</script></body></html>"""
+NETRL={}
+def net_blob(ip,q):
+  # random bytes of the asked size (1 B .. 256 KB) for the transfer test; rate limited per address
+  now=time.time(); h=[t for t in NETRL.get(ip,[]) if now-t<60]
+  if len(h)>=120: return None
+  h.append(now); NETRL[ip]=h
+  try: n=min(max(int(q.get("n",["1024"])[0]),1),262144)
+  except ValueError: n=1024
+  return os.urandom(n)
 
 class Srv(ThreadingHTTPServer):
   allow_reuse_address=True; daemon_threads=True; request_queue_size=64; ctx=None
@@ -3071,6 +3099,11 @@ class H(BaseHTTPRequestHandler):
         s.send_response(200); s.send_header("Content-Type","text/html;charset=utf-8"); s.send_header("Cache-Control","no-cache"); s.send_header("Vary","Accept-Encoding")   # no-cache: revalidate, a panel update shows up without a hard refresh
         if gz: s.send_header("Content-Encoding","gzip")
         s.send_header("Content-Length",str(len(b))); s.end_headers(); s.wfile.write(b); return
+      if p=="/net": s.raw(NET_PAGE.encode(),"text/html;charset=utf-8",200,{"Cache-Control":"no-store"}); return
+      if p=="/net/blob":
+        b=net_blob(s.client_address[0],parse_qs(urlparse(s.path).query))
+        if b is None: s.js({"err":2},429); return
+        s.raw(b,"application/octet-stream",200,{"Cache-Control":"no-store"}); return
       if p.startswith("/s/"):                                   # public subscription page (secret token in the URL)
         k="s:"+s.client_address[0]; now=time.time(); FAIL[k]=[t for t in FAIL.get(k,[]) if now-t<300]
         if len(FAIL[k])>=20: s.js({"err":2},429); return

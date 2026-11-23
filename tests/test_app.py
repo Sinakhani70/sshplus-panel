@@ -473,6 +473,21 @@ class CertificateFlow(unittest.TestCase):
         self.assertFalse(app.aaaa_mismatch([], {"2001:db8::2"}))
 
 
+class TransferTest(unittest.TestCase):
+    def test_blob_size_is_clamped_and_rate_limited(self):
+        app.NETRL.clear()
+        self.assertEqual(len(app.net_blob("1.2.3.4", {"n": ["4096"]})), 4096)
+        self.assertEqual(len(app.net_blob("1.2.3.4", {"n": ["99999999"]})), 262144)
+        self.assertEqual(len(app.net_blob("1.2.3.4", {"n": ["0"]})), 1)
+        self.assertEqual(len(app.net_blob("1.2.3.4", {"n": ["abc"]})), 1024)
+        self.assertEqual(len(app.net_blob("1.2.3.4", {})), 1024)
+        for _ in range(120): app.net_blob("5.6.7.8", {"n": ["1"]})
+        self.assertIsNone(app.net_blob("5.6.7.8", {"n": ["1"]})); self.assertIsNotNone(app.net_blob("9.9.9.9", {"n": ["1"]}))
+        self.assertNotEqual(app.net_blob("1.1.1.1", {"n": ["64"]}), app.net_blob("1.1.1.1", {"n": ["64"]}))   # random: a compressing middlebox cannot shrink it
+        app.NETRL.clear()
+        self.assertLess(len(app.NET_PAGE), 6000)                                                         # the test page itself must be tiny
+
+
 class ConnectionLimit(unittest.TestCase):
     def test_extra_devices_are_cut_oldest_stay(self):
         sip = {10: "1.1.1.1", 11: "1.1.1.1", 12: "1.1.1.1", 20: "2.2.2.2", 30: "3.3.3.3", 31: "3.3.3.3"}
