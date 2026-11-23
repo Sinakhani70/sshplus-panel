@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 import unittest
@@ -432,6 +433,44 @@ class SecurityHardening(unittest.TestCase):
         app.prune_auth()
         self.assertEqual(list(app.TOK), ["new"]); self.assertEqual(list(app.FAIL), ["2.2.2.2"])
         app.TOK.clear(); app.FAIL.clear()
+
+
+class CertificateFlow(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); d = self.d.name
+        self.keep = {n: getattr(app, n) for n in ("CERT", "CKEY", "TLSC", "CERT_RELOAD", "cmd", "tls_reload")}
+        app.CERT, app.CKEY, app.TLSC, app.CERT_RELOAD = (os.path.join(d, n) for n in ("panel.crt", "panel.key", "tls.json", "cert.reload"))
+        app.cmd = lambda c, *a, **k: (0, "", ""); app.tls_reload = lambda: None
+        self.live = os.path.join(d, "live"); os.makedirs(self.live)
+        for name in ("lab.example", "lab.example-staging"):
+            ld = os.path.join(self.live, name); os.makedirs(ld)
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=" + name, "-keyout", ld + "/privkey.pem", "-out", ld + "/fullchain.pem"], capture_output=True)
+    def tearDown(self):
+        for n, v in self.keep.items(): setattr(app, n, v)
+        self.d.cleanup()
+    def installed(self): return open(app.CERT).read()
+    def test_only_the_installed_lineage_may_replace_the_certificate(self):
+        json.dump({"domain": "lab.example", "mode": "own", "staging": False, "lineage": "lab.example"}, open(app.TLSC, "w"))
+        prod = os.path.join(self.live, "lab.example"); stg = os.path.join(self.live, "lab.example-staging")
+        self.assertEqual(app.cli_cert_renewed(stg), 0); self.assertFalse(os.path.exists(app.CERT))        # a leftover staging lineage is ignored
+        self.assertEqual(app.cli_cert_renewed(prod), 0); self.assertEqual(self.installed(), open(prod + "/fullchain.pem").read().strip() + "\n")
+        self.assertTrue(os.path.exists(app.CERT_RELOAD))                                                  # asks the panel to reload, never restarts it
+        self.assertEqual(app.cli_cert_renewed("/etc/letsencrypt/live/other.example"), 0)
+    def test_staging_certificate_is_kept_up_to_date_when_it_is_the_installed_one(self):
+        json.dump({"domain": "lab.example", "mode": "own", "staging": True, "lineage": "lab.example-staging"}, open(app.TLSC, "w"))
+        self.assertEqual(app.tls_lineage(app.tls_cfg()), "lab.example-staging")
+        self.assertEqual(app.cli_cert_renewed(os.path.join(self.live, "lab.example")), 0); self.assertFalse(os.path.exists(app.CERT))
+        self.assertEqual(app.cli_cert_renewed(os.path.join(self.live, "lab.example-staging")), 0); self.assertTrue(os.path.exists(app.CERT))
+    def test_lineage_falls_back_to_the_flag_for_older_installs_and_is_ignored_when_foreign(self):
+        json.dump({"domain": "a.example", "staging": True}, open(app.TLSC, "w")); self.assertEqual(app.tls_lineage(app.tls_cfg()), "a.example-staging")
+        json.dump({"domain": "a.example", "staging": False, "lineage": "evil.example"}, open(app.TLSC, "w")); self.assertEqual(app.tls_lineage(app.tls_cfg()), "a.example")
+        json.dump({}, open(app.TLSC, "w")); self.assertEqual(app.tls_lineage(app.tls_cfg()), "")
+    def test_reload_flag_is_consumed(self):
+        open(app.CERT_RELOAD, "w").close(); app.cert_reload_check(); self.assertFalse(os.path.exists(app.CERT_RELOAD))
+    def test_email_cannot_look_like_an_option_and_aaaa_check(self):
+        self.assertIsNone(app.MAIL_RE.match("-x@example.com")); self.assertIsNone(app.MAIL_RE.match("--staging@example.com")); self.assertTrue(app.MAIL_RE.match("me@example.com"))
+        self.assertTrue(app.aaaa_mismatch(["2001:db8::1"], {"2001:db8::2"})); self.assertFalse(app.aaaa_mismatch(["2001:db8::1"], {"2001:db8::1"}))
+        self.assertFalse(app.aaaa_mismatch([], {"2001:db8::2"}))
 
 
 class ConnectionLimit(unittest.TestCase):
